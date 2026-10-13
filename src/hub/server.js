@@ -45,6 +45,7 @@ function createHub({
   secret = '',
   staleAfterMs = DEFAULT_STALE_AFTER_MS,
   broadcastDelayMs = 100,
+  persistIntervalMs = 0,
   dataFile = path.join(projectRoot(), 'data', 'devices.json'),
   logger = console
 } = {}) {
@@ -56,11 +57,22 @@ function createHub({
     store.subscriptions = emptySubscriptionDocument();
   }
   const bindHost = resolveBindHost(host, secret);
+  let persistTimer = null;
 
   function persist() {
     store.version = 1;
     store.savedAt = new Date().toISOString();
-    writeJsonAtomic(dataFile, store);
+    writeJsonAtomic(dataFile, store, 0);
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+
+  function queuePersist() {
+    if (persistIntervalMs === 0) return persist();
+    // Keep the first deadline: continuous uploads must not postpone saving.
+    if (persistTimer) return;
+    persistTimer = setTimeout(persist, persistIntervalMs);
+    persistTimer.unref();
   }
 
   function getStats() {
@@ -163,7 +175,7 @@ function createHub({
     const incoming = stripSessionTextFromDeviceRecord(payload);
     const record = mergeDeviceRecord(existing, { ...incoming, receivedAt: new Date().toISOString() });
     store.devices[record.deviceId] = record;
-    persist();
+    queuePersist();
     if (statsListeners.size > 0) notifyStatsListeners('ingest');
     queueStatsBroadcast();
     return record;
@@ -355,12 +367,20 @@ function createHub({
   }
 
   function stop() {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       if (broadcastTimer) clearTimeout(broadcastTimer);
       broadcastTimer = null;
       for (const client of sseClients) { try { client.res.end(); } catch (_) {} }
       sseClients.clear();
-      server.close(() => resolve());
+      server.close(() => {
+        try {
+          // Closing first lets in-flight ingests finish before the final save.
+          if (persistTimer) persist();
+          resolve();
+        } catch (error) {
+          reject(error);
+        }
+      });
     });
   }
 
@@ -377,12 +397,22 @@ if (require.main === module) {
   const host = String(args.host || process.env.TOKEN_MONITOR_HOST || '0.0.0.0');
   const secret = String(args.secret || process.env.TOKEN_MONITOR_SECRET || '').trim();
   const staleAfterMs = Number(args.staleAfterMs || process.env.TOKEN_MONITOR_STALE_AFTER_MS || DEFAULT_STALE_AFTER_MS);
+  const persistIntervalMs = Number(args.persistIntervalMs ?? process.env.TOKEN_MONITOR_PERSIST_INTERVAL_MS ?? 0);
   const dataFile = String(args.dataFile || process.env.TOKEN_MONITOR_DATA_FILE || path.join(projectRoot(), 'data', 'devices.json'));
 
-  const hub = createHub({ port, host, secret, staleAfterMs, dataFile });
+  const hub = createHub({ port, host, secret, staleAfterMs, persistIntervalMs, dataFile });
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.once(signal, () => {
+      hub.stop().catch((error) => {
+        console.error(`Hub failed to stop: ${error.message}`);
+        process.exitCode = 1;
+      });
+    });
+  }
   hub.start().then(() => {
     console.log(`Token Monitor hub listening on http://${hub.bindHost}:${port}`);
     console.log(`Data file: ${dataFile}`);
+    console.log(`Persistence interval: ${persistIntervalMs}ms`);
     if (!secret) {
       console.warn(`Warning: TOKEN_MONITOR_SECRET is not set, so the hub is bound to ${hub.bindHost} (localhost only) to keep account identity off the network. Set a secret to accept connections from other devices.`);
     }

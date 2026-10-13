@@ -38,6 +38,9 @@ The agent and hub have no UI. Configure them with a `.env` file in the project r
 TOKEN_MONITOR_HUB_URL=               # required in sync mode — Worker URL or http://<lan-ip>:17321
 TOKEN_MONITOR_SECRET=                # shared secret; must match the hub
 TOKEN_MONITOR_DEVICE_ID=             # optional — defaults to the hostname
+TOKEN_MONITOR_PERSIST_INTERVAL_MS=   # Node Hub only — 0/default saves each upload; 300000 batches for 5min
+TOKEN_MONITOR_INTERVAL_MS=           # headless agent — defaults to 300000/5min
+TOKEN_MONITOR_WATCH=                 # headless agent — 0 disables activity-triggered scans; defaults to 1
 TOKEN_MONITOR_SYNC_UPLOAD_INTERVAL_MS= # optional — 0/live, 600000/10min, 1200000/20min, 1800000/30min
 TOKEN_MONITOR_CLIENTS=               # optional — defaults to all supported tools; empty disables tracking
 TOKEN_MONITOR_PROJECTS_ENABLED=      # optional — defaults on; 0 stops collecting project metadata

@@ -116,6 +116,8 @@ Every publish recomposes and ships the whole stats tree, so its cost is paid per
 
 ## Data flow contract
 
+The Node Hub can batch device persistence with `persistIntervalMs` / `TOKEN_MONITOR_PERSIST_INTERVAL_MS`. The default `0` preserves synchronous upload saves; a positive interval saves the latest records at a fixed deadline after the first pending upload, without delaying API/SSE updates. Saves use compact JSON and atomic replacement of the existing file. Device deletion and subscription writes persist immediately and consume pending uploads. `stop()` drains HTTP requests and saves pending records; the standalone process calls it on SIGINT/SIGTERM. Abrupt termination can lose updates since the last save, and file readers lag live API data by at most the save interval. A headless agent with watching disabled includes its collection interval as `syncUploadIntervalMs` for the existing freshness calculation.
+
 The Hub stores normalized device records (`normalizeDeviceRecord`) and aggregates on read (`aggregateDevices`). `DeviceState` composes the wire record from usage, the runtime envelope and limits: limits-only updates keep the usage `updatedAt`, and cold-start previews wait for a complete usage baseline. `collectUsageOnce()` owns the usage portion; `docs/API.md` documents the full contract, which the Worker shares exactly. Neither Hub needs provider credentials.
 
 Settings keys, env vars, CLI flags, Hub endpoints and this wire shape have external users: treat changes as breaking and plan the migration.
