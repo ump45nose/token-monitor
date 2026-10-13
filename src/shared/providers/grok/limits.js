@@ -704,7 +704,7 @@ async function fetchGrokLimits(options = {}, deps = {}) {
   const env = deps.env || process.env;
   const now = (deps.now || Date.now)();
   const updatedAt = new Date(now).toISOString();
-  const credential = await resolveGrokCredential(env, options, deps);
+  let credential = await resolveGrokCredential(env, options, deps);
   if (shouldTryGrokRpc(credential, deps)) {
     try {
       const rpcBody = await (deps.fetchRpcBilling || fetchGrokRpcBilling)(options, deps);
@@ -737,6 +737,11 @@ async function fetchGrokLimits(options = {}, deps = {}) {
       }
       // With an auth.json credential available, CodexBar falls back from CLI RPC
       // to the web billing path in auto mode. Preserve that behavior here.
+      // The CLI can refresh auth.json before reporting an unsupported method.
+      // Read its current token instead of sending the pre-refresh token to web.
+      if (credential.source.startsWith('auth.json') && !credential.wsl) {
+        credential = await resolveGrokCredential(env, options, deps) || credential;
+      }
     }
   }
   if (!credential) {

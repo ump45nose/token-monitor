@@ -565,6 +565,30 @@ test('fetchGrokLimits falls back to CodexBar grok.com grpc-web billing when CLI 
   assert.equal(r.windows[0].usedPercent, 67);
 });
 
+test('fetchGrokLimits uses the token renewed by CLI before web fallback', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'grok-rpc-renewed-'));
+  const scope = 'https://auth.x.ai::client';
+  writeAuthJson(home, { [scope]: { key: 'expired-token' } });
+  try {
+    const result = await fetchGrokLimits({}, {
+      env: {},
+      grokHome: home,
+      fetchRpcBilling: async () => {
+        writeAuthJson(home, { [scope]: { key: 'renewed-token' } });
+        throw new Error('Method not found');
+      },
+      fetchWebGrpcBilling: async (credential) => {
+        assert.equal(credential.token, 'renewed-token');
+        return [{ kind: 'billing', label: 'Monthly', usedPercent: 25 }];
+      }
+    });
+    assert.equal(result.status, 'ok');
+    assert.equal(result.source, 'web');
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('fetchGrokLimits maps CLI RPC auth failure without bearer fallback to unauthorized', async () => {
   const r = await fetchGrokLimits(
     {},
