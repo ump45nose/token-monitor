@@ -655,6 +655,14 @@ test('limitsRefreshMs reconfigures only one runtime timer using elapsed cadence'
   clock.advance(1);
   await waitFor(() => calls === 3, 'rescheduled interval refresh');
   assert.deepEqual(clock.delays(), [300_000]);
+  runtime.reconfigure({ limitsRefreshMs: 3_600_000 });
+  assert.equal(runtime.getSnapshot().refreshMs, 3_600_000);
+  assert.deepEqual(clock.delays(), [3_600_000]);
+  clock.advance(3_599_999);
+  assert.equal(calls, 3);
+  clock.advance(1);
+  await waitFor(() => calls === 4, 'hourly interval refresh');
+  assert.deepEqual(clock.delays(), [3_600_000]);
   runtime.stop();
 });
 

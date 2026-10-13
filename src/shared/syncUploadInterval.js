@@ -4,7 +4,8 @@ const SYNC_UPLOAD_INTERVAL_OPTIONS = Object.freeze([
   0,
   10 * 60 * 1000,
   20 * 60 * 1000,
-  30 * 60 * 1000
+  30 * 60 * 1000,
+  60 * 60 * 1000
 ]);
 const DEFAULT_STALE_AFTER_MS = 10 * 60 * 1000;
 const DEFAULT_SYNC_UPLOAD_INTERVAL_MS = 0;

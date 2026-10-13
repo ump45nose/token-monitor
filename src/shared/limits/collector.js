@@ -93,7 +93,7 @@ const { fetchClineLimits } = clineLimits;
 
 const DEFAULT_PROVIDER_PHYSICAL_BOUND_MS = 120_000;
 const PROVIDER_CLEANUP_GRACE_MS = 5_000;
-const LIMIT_REFRESH_VALUES = new Set([60_000, 120_000, 300_000, 900_000, 1_800_000]);
+const LIMIT_REFRESH_VALUES = new Set([60_000, 120_000, 300_000, 900_000, 1_800_000, 3_600_000]);
 function parseLimitProviders(value) {
   // Omission keeps the historical default; an explicitly empty setting means
   // that no provider is enabled and must survive persistence/reload.

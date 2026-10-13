@@ -42,6 +42,9 @@ The agent and hub have no UI. Configure them with a `.env` file in the project r
 TOKEN_MONITOR_HUB_URL=               # required in sync mode — Worker URL or http://<lan-ip>:17321
 TOKEN_MONITOR_SECRET=                # shared secret; must match the hub
 TOKEN_MONITOR_DEVICE_ID=             # optional — defaults to the hostname
+TOKEN_MONITOR_INTERVAL_MS=           # headless usage cadence — defaults to 300000; 3600000 for hourly
+TOKEN_MONITOR_WATCH=                 # headless file watching — 0 disables event-triggered scans
+TOKEN_MONITOR_HISTORY_INTERVAL_MS=   # history bucket size — 300000, 600000, 900000, 1800000 or 3600000
 TOKEN_MONITOR_PERSIST_INTERVAL_MS=   # Node Hub only — 0/default saves each upload; 300000 batches for 5min
 TOKEN_MONITOR_SYNC_UPLOAD_INTERVAL_MS= # optional — 0/live, 600000/10min, 1200000/20min, 1800000/30min
 TOKEN_MONITOR_CLIENTS=               # optional — defaults to all supported tools; empty disables tracking
@@ -51,7 +54,7 @@ TOKEN_MONITOR_SESSION_USAGE_ARCHIVE_ENABLED= # optional — defaults on; 0 stops
 TOKEN_MONITOR_LIMITS_ENABLED=        # optional — defaults on; 0 skips CLI probing
 TOKEN_MONITOR_LIMIT_PROVIDERS=       # optional — omit for all supported providers; empty probes none
 TOKEN_MONITOR_LIMITS_REFRESH_MODE=   # optional — fixed (default) or adaptive
-TOKEN_MONITOR_LIMITS_REFRESH_MS=     # optional — interval for fixed mode; defaults to 300000
+TOKEN_MONITOR_LIMITS_REFRESH_MS=     # fixed mode — defaults to 300000; supports 3600000 for hourly
 # WorkBuddy: the desktop widget auto-detects the signed-in local app when the
 # provider is enabled.
 # The following are an advanced/headless-agent fallback, not normal widget setup.
@@ -71,6 +74,8 @@ Provider credentials (Grok, DeepSeek, Minimax, Copilot, GLM / GLM Team, Volcengi
 The widget reads most settings as first-run defaults. WorkBuddy follows the same provider checkbox as other auto-detected integrations on macOS and Windows; Linux local-app monitoring is unsupported. Desktop users do not copy a token, and the WorkBuddy token fields above apply only to the headless agent/CLI. The agent and hub take a CLI flag over an env var over the built-in default.
 
 The standalone Node Hub accepts `--persistIntervalMs` or `TOKEN_MONITOR_PERSIST_INTERVAL_MS`. Leave it at `0` to save synchronously after each upload. A positive value, such as `300000`, batches usage snapshots at a fixed deadline after the first pending upload; continuous uploads do not reset it. API/SSE reads still update immediately. File-based readers can lag by that interval, and abrupt termination can lose updates accepted since the last save. Normal SIGINT/SIGTERM shutdown, device deletion, subscription edits, shared settings and title policy changes save immediately.
+
+For hourly headless collection and quota refresh, set `TOKEN_MONITOR_INTERVAL_MS=3600000`, `TOKEN_MONITOR_WATCH=0`, `TOKEN_MONITOR_LIMITS_REFRESH_MODE=fixed`, and `TOKEN_MONITOR_LIMITS_REFRESH_MS=3600000`. Set `TOKEN_MONITOR_HISTORY_INTERVAL_MS=3600000` for hourly History buckets. The agent reports its hourly cadence to the Hub, which keeps the device fresh for two hours. Setting `TOKEN_MONITOR_PERSIST_INTERVAL_MS=3600000` on the Node Hub also batches uploads into hourly saves; file readers can then lag by an additional hour.
 
 One-shot run (collect once and exit — useful for cron / launchd):
 
