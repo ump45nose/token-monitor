@@ -36,6 +36,13 @@ Roughly 45% of the session directories on a busy machine are subagent sessions, 
 
 ## Verification
 
+Headless quota collection honors the configured outbound proxy. The CLI can
+renew its OIDC token in `auth.json` during initialization even when its billing
+RPC returns `Method not found`. The web fallback rereads that file after the
+RPC fails so it uses the renewed token. Explicit env/settings credentials keep
+their existing priority; actual authentication failures remain unauthorized.
+
 ```
 node --test tests/shared/grokSessionMetadata.test.js
+node --test tests/shared/grokLimits.test.js
 ```
