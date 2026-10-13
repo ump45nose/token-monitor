@@ -204,7 +204,10 @@ async function main() {
     hubUrl, deviceId, headers: secret ? { authorization: `Bearer ${secret}` } : {}, enabled: syncSessionTitles
   });
   const runtimeOptions = {
-    envelope: { deviceId, agentVersion: appVersion(), agentRuntime: 'headless-agent' },
+    envelope: {
+      deviceId, agentVersion: appVersion(), agentRuntime: 'headless-agent',
+      syncUploadIntervalMs: watchEnabled ? 0 : intervalMs
+    },
     usageOptions,
     limitsOptions,
     transformUsage: summaryWithSessionUsageArchive,
