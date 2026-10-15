@@ -1,14 +1,11 @@
-# Qoder CN token availability UI evidence
+# Qoder CN CLI reported credits UI evidence
 
-Synthetic collection-health panel rendered with Token Monitor's production `clientHealthPanel`, `clientHealthGroup`, health presentation helper, i18n and stylesheet in headless Chrome on macOS. The panel is constrained to 320 CSS pixels, matching the narrow widget. No real account data, transcript content or project path is included. This is a component-level browser check, not a packaged Electron or other-platform runtime test.
+Synthetic data rendered in Token Monitor's production DOM, stylesheet, i18n, fixed-period helper, `renderHomeCreditsModule()` and credits view from implementation commit `bff9131e559caa69d35334676579f5c8885c90f0`. An isolated Chromium fixture replaces IPC/app bootstrap; this is a component-level browser check at 320 CSS pixels on macOS, not a packaged Electron or other-platform runtime test.
 
-- Before: upstream `631c25cb4947bd7a75aebf5997bbeadd33cc9c98`.
-- After: fix commit `58d43ad`.
-- Same synthetic source checks and zero-token counters in both renders.
-- Screenshot asset files live on this evidence-only branch, outside the code PR diff.
+The fixture exercises DAY/MONTH/TOTAL selection (0.35 / 0.85 / 3.35 credits), while token totals and dollar cost remain zero. It also shows a failed first scan as unknown credits with a visible warning. No real account, transcript or project data is included. These assets are on an evidence-only fork branch, outside the code PR diff.
 
-| Before | After |
+| Monthly credits (Simplified Chinese) | Daily credits (English) |
 | --- | --- |
-| ![Before](qodercn-before-zh.png) | ![After](qodercn-after-zh.png) |
+| ![Monthly credits](qodercn-credits-month-zh.png) | ![Daily credits](qodercn-credits-day-en.png) |
 
-![English after](qodercn-after-en.png)
+![Failed scan with no baseline](qodercn-credits-error-zh.png)
