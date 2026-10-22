@@ -55,6 +55,8 @@ function createHub({
   logger = console
 } = {}) {
   const store = readJson(dataFile, { version: 1, devices: {} }) || { version: 1, devices: {} };
+  const subscriptionsExternal = process.env.TOKEN_MONITOR_SUBSCRIPTIONS_MANAGED_EXTERNALLY === '1';
+  const externalSubscriptions = { ...emptySubscriptionDocument(), updatedAt: new Date().toISOString(), managedExternally: true };
   if (!store.devices || typeof store.devices !== 'object') store.devices = {};
   // Subscriptions are shared by every device on this hub rather than owned by one
   // of them, so they sit beside the device map rather than inside it.
@@ -108,7 +110,7 @@ function createHub({
     // device compares it against the copy it holds and re-reads only when it has
     // been overtaken, so learning about another device's edit costs nothing in
     // the steady state and does not put what the user pays into every frame.
-    stats.subscriptionsUpdatedAt = store.subscriptions?.updatedAt || '';
+    stats.subscriptionsUpdatedAt = getSubscriptions().updatedAt || '';
     stats.syncSettingsRevisions = Object.fromEntries(SHARED_SYNC_KINDS.map((kind) => [kind, getSyncSettings(kind).revision]));
     return stats;
   }
@@ -274,12 +276,18 @@ function createHub({
   }
 
   function getSubscriptions() {
+    if (subscriptionsExternal) return externalSubscriptions;
     return store.subscriptions;
   }
 
   // Transport-agnostic like ingest(), so a host-mode widget writes its own hub
   // in-process instead of looping back over HTTP to itself.
   function setSubscriptions(subscriptions, baseUpdatedAt) {
+    if (subscriptionsExternal) {
+      const error = new Error('Subscriptions are managed by Personal Subscriptions');
+      error.code = 'managed_externally';
+      throw error;
+    }
     // A non-array would normalize to an empty list and be stored as a perfectly
     // successful replacement, wiping records that exist nowhere else. An
     // intentional clear still sends [].
@@ -438,6 +446,7 @@ function createHub({
         const stored = setSubscriptions(payload?.subscriptions, payload?.baseUpdatedAt);
         return sendJson(res, 200, { ok: true, ...stored });
       } catch (error) {
+        if (error.code === 'managed_externally') return sendJson(res, 409, { error: 'managed_externally', ...getSubscriptions() });
         if (error.code === 'stale_write') {
           return sendJson(res, 409, { error: 'stale_write', ...error.current });
         }
