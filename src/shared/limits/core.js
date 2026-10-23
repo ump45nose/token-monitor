@@ -614,6 +614,18 @@ function isConfiguredProvider(provider) {
   return Boolean(provider.accountKey && provider.status !== 'notConfigured' && provider.status !== 'disabled');
 }
 
+// Desktop local samples retain their observation time. An empty failure on
+// another device cannot establish that the sampled account signed out.
+function isLocalSampleProvider(provider) {
+  return Boolean(provider && provider.provider === 'claude' && provider.source === 'local' && provider.accountKey);
+}
+
+function isUsefulLimitObservation(provider) {
+  return ['ok', 'rateLimited', 'sourceRateLimited'].includes(provider.status)
+    || (Array.isArray(provider.windows) && provider.windows.length > 0)
+    || provider.balance != null || provider.balanceUsd != null;
+}
+
 function providerCollapseKey(provider) {
   // Antigravity account keys are portable only when a normalized Google email
   // proves the identity. Anonymous RPC fallback keys are local observations,
@@ -960,6 +972,7 @@ function aggregateLimits(devices, staleAfterMs = 0, nowMs = Date.now()) {
   const providersWithConfiguredAccounts = new Set();
   const providersWithFreshConfiguredAccounts = new Set();
   const providersWithFreshObservations = new Set();
+  const providersWithUsefulFreshObservations = new Set();
 
   for (const device of devices || []) {
     const summary = normalizeLimitsSummary(device?.limits);
@@ -970,8 +983,12 @@ function aggregateLimits(devices, staleAfterMs = 0, nowMs = Date.now()) {
         stale: isProviderStale(provider, summary, device, staleAfterMs, nowMs)
       };
       if (isConfiguredProvider(provider)) providersWithConfiguredAccounts.add(provider.provider);
+      if (isLocalSampleProvider(provider) && isConfiguredProvider(provider)) {
+        providersWithFreshConfiguredAccounts.add(provider.provider);
+      }
       if (!candidate.stale) {
         providersWithFreshObservations.add(provider.provider);
+        if (isUsefulLimitObservation(provider)) providersWithUsefulFreshObservations.add(provider.provider);
         if (isConfiguredProvider(provider)) providersWithFreshConfiguredAccounts.add(provider.provider);
       }
       const key = providerAggregateKey(candidate);
@@ -1000,7 +1017,10 @@ function aggregateLimits(devices, staleAfterMs = 0, nowMs = Date.now()) {
   const byProvider = new Map();
   for (const candidate of byKey.values()) {
     const hasFreshObservation = providersWithFreshObservations.has(candidate.provider);
-    if (candidate.stale && hasFreshObservation) continue;
+    const hasEclipsingFreshObservation = isLocalSampleProvider(candidate)
+      ? providersWithUsefulFreshObservations.has(candidate.provider)
+      : hasFreshObservation;
+    if (candidate.stale && hasEclipsingFreshObservation) continue;
     const configuredProviders = hasFreshObservation
       ? providersWithFreshConfiguredAccounts
       : providersWithConfiguredAccounts;
