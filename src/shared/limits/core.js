@@ -1020,7 +1020,11 @@ function aggregateLimits(devices, staleAfterMs = 0, nowMs = Date.now()) {
     const hasEclipsingFreshObservation = isLocalSampleProvider(candidate)
       ? providersWithUsefulFreshObservations.has(candidate.provider)
       : hasFreshObservation;
-    if (candidate.stale && hasEclipsingFreshObservation) continue;
+    // A different account's fresh report cannot retire this configured account.
+    const accountScoped = isConfiguredProvider(candidate)
+      && providersWithFreshConfiguredAccounts.has(candidate.provider)
+      && providerCollapseKey(candidate) !== candidate.provider;
+    if (candidate.stale && hasEclipsingFreshObservation && !accountScoped) continue;
     const configuredProviders = hasFreshObservation
       ? providersWithFreshConfiguredAccounts
       : providersWithConfiguredAccounts;
