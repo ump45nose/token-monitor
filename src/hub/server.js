@@ -22,6 +22,7 @@ const {
 } = require('../shared/subscriptionDisplay');
 const { CURRENCY_CODES, normalizeCurrency } = require('../shared/currency');
 const { currentHubBuild } = require('../shared/hubBuildIdentity');
+const { createSubscriptionBridge } = require('./subscriptionBridge');
 const {
   freshnessEvent,
   hubStatsContentKey,
@@ -57,6 +58,13 @@ function createHub({
   const store = readJson(dataFile, { version: 1, devices: {} }) || { version: 1, devices: {} };
   const subscriptionsExternal = process.env.TOKEN_MONITOR_SUBSCRIPTIONS_MANAGED_EXTERNALLY === '1';
   const externalSubscriptions = { ...emptySubscriptionDocument(), updatedAt: new Date().toISOString(), managedExternally: true };
+  const subscriptionBridge = subscriptionsExternal && process.env.TOKEN_MONITOR_SUBSCRIPTIONS_URL
+    ? createSubscriptionBridge({
+      url: process.env.TOKEN_MONITOR_SUBSCRIPTIONS_URL,
+      readToken: process.env.TOKEN_MONITOR_SUBSCRIPTIONS_READ_TOKEN,
+      writeToken: process.env.TOKEN_MONITOR_SUBSCRIPTIONS_WRITE_TOKEN,
+      onChange: () => broadcastStats('subscriptions')
+    }) : null;
   if (!store.devices || typeof store.devices !== 'object') store.devices = {};
   // Subscriptions are shared by every device on this hub rather than owned by one
   // of them, so they sit beside the device map rather than inside it.
@@ -276,6 +284,7 @@ function createHub({
   }
 
   function getSubscriptions() {
+    if (subscriptionBridge) return subscriptionBridge.current();
     if (subscriptionsExternal) return externalSubscriptions;
     return store.subscriptions;
   }
@@ -387,6 +396,10 @@ function createHub({
       }
     }
 
+    if (subscriptionBridge && (url.pathname === '/api/stats' || url.pathname === '/api/stats/stream')) {
+      // Quota and usage reads remain available while the independent ledger is down.
+      subscriptionBridge.read().catch(() => {});
+    }
     if (req.method === 'GET' && url.pathname === '/api/stats') return sendJson(res, 200, getStats());
     if (req.method === 'GET' && url.pathname === '/api/devices') return sendJson(res, 200, { devices: getDevices() });
     if (req.method === 'GET' && url.pathname === '/api/history') return sendJson(res, 200, getHistory());
@@ -431,6 +444,19 @@ function createHub({
           return sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
         }
         return sendJson(res, 400, { error: 'bad_request', message: error.message });
+      }
+    }
+
+    if (subscriptionBridge && url.pathname === '/api/subscriptions' && ['GET', 'PUT'].includes(req.method)) {
+      try {
+        const document = req.method === 'GET'
+          ? await subscriptionBridge.read(true)
+          : await subscriptionBridge.write(await readJsonBody(req));
+        return sendJson(res, 200, { ok: true, ...document });
+      } catch (error) {
+        if (error.code === 'stale_write') return sendJson(res, 409, { error: 'stale_write', ...error.current });
+        return sendJson(res, error.code === 'payload_too_large' ? 413 : error instanceof SyntaxError ? 400 : error.status || 502,
+          { error: 'subscription_service', message: 'Subscription request could not be completed' });
       }
     }
 
