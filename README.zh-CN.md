@@ -38,6 +38,7 @@
 
 <p align="center">
     <img src=".github/assets/tools-icon/claude.png" width="40" alt="Claude Code" title="Claude Code" />
+    <img src=".github/assets/tools-icon/claude-desktop.png" width="40" alt="Claude Desktop" title="Claude Desktop" />
     <img src=".github/assets/tools-icon/codex.png" width="40" alt="Codex" title="Codex" />
     <img src=".github/assets/tools-icon/opencode.png" width="40" alt="OpenCode" title="OpenCode" />
     <img src=".github/assets/tools-icon/hermes-agent.png" width="40" alt="Hermes Agent" title="Hermes Agent" />
@@ -154,7 +155,7 @@ brew install --cask token-monitor
 
 ### 用量追踪
 
-- **实时 Token 追踪**：Claude Code、Codex、Cursor、GitHub Copilot、Antigravity、OpenCode 等 38+ 种 AI 工具，每轮对话后 UI 在数秒内刷新（完整列表见上方表格）
+- **实时 Token 追踪**：Claude Code、Codex、Cursor、GitHub Copilot、Antigravity、OpenCode 等 39+ 种 AI 工具，每轮对话后 UI 在数秒内刷新（完整列表见上方表格）
 - **实时 Token 速率**：可选显示的实时读数，以 `tok/s` 显示生成速度或以 `tok/min` 显示总消耗
 - **单个 session 明细**：点进某个 session，可看每条提问的 Token 消耗，并展开查看每次回复的 Token 拆分与用到的工具（打开时才实时读取本机 transcript 或数据库，绝不同步）
 - **缓存命中统计**：点击任何工具或模型，展开查看输入 Token（缓存命中与未命中）、输出 Token 的详细分类及命中率百分比
@@ -210,6 +211,7 @@ Token Monitor 对 Token 用量、账户额度和 session 明细分别支持：
 | Logo | 工具 | 数据路径 | Token 用量 | AI 工具额度 | session 明细 |
 |:---:|------|-----------|:---:|:---:|:---:|
 | <img src=".github/assets/tools-icon/claude.png" width="28" alt="Claude Code" /> | Claude Code | `~/.claude/projects/`、`~/.claude/transcripts/` | ✅ | ✅ | ✅ |
+| <img src=".github/assets/tools-icon/claude-desktop.png" width="28" alt="Claude Desktop" /> | Claude Desktop | `~/.claude/projects/` 中由 Desktop 启动的 session；`<Claude userData>/local-agent-mode-sessions/`、`claude-code-sessions/` | ✅ | — | ✅ |
 | <img src=".github/assets/tools-icon/codex.png" width="28" alt="Codex" /> | Codex | `~/.codex/`（`sessions/`、`archived_sessions/`） | ✅ | ✅ | ✅ |
 | <img src=".github/assets/tools-icon/opencode.png" width="28" alt="OpenCode" /> | OpenCode | `~/.local/share/opencode/`（`opencode*.db`、`storage/message/`） | ✅ | ✅ | ✅ |
 | <img src=".github/assets/tools-icon/hermes-agent.png" width="28" alt="Hermes Agent" /> | Hermes Agent | `~/.hermes/state.db` | ✅ | — | — |
