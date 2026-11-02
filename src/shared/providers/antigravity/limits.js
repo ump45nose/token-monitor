@@ -105,6 +105,51 @@ function antigravityAccountError(account, error, nowMs) {
   });
 }
 
+// The language server is only reachable while Antigravity (IDE or `agy`) is
+// running, so the local sign-in is otherwise invisible: after a restart the
+// widget would only know the managed OAuth accounts, and anything that picks
+// "an Antigravity account" (the subscription form) silently falls back to one
+// of those even when this device's agy is signed in to someone else. The host
+// remembers the last address a live probe reported (no token, address only)
+// and the collector keeps offering it as an identity-only row until the
+// language server answers again.
+function rememberedLocalAccount(deps = {}) {
+  let remembered = null;
+  try {
+    remembered = typeof deps.resolveAntigravityLocalAccount === 'function'
+      ? deps.resolveAntigravityLocalAccount()
+      : deps.antigravityLocalAccount;
+  } catch (_) {
+    return null;
+  }
+  const accountEmail = String(remembered?.accountEmail || '').trim().toLowerCase();
+  if (!accountEmail || !accountEmail.includes('@')) return null;
+  return { accountEmail, accountKey: antigravityOAuth.accountKey(accountEmail) };
+}
+
+function rememberedLocalProvider(remembered, error, nowMs) {
+  return normalizeLimitProvider({
+    provider: 'antigravity',
+    accountKey: remembered.accountKey,
+    accountLabel: '',
+    accountEmail: remembered.accountEmail,
+    source: 'rpc',
+    status: error ? providerStatusFromError(error) : 'notConfigured',
+    updatedAt: nowIso(nowMs),
+    windows: []
+  });
+}
+
+function observeLocalAccount(provider, deps = {}) {
+  const accountEmail = String(provider?.accountEmail || '').trim();
+  if (!provider?.accountKey || !accountEmail) return;
+  try {
+    deps.onAntigravityLocalAccountObserved?.({ accountEmail });
+  } catch (_) {
+    // Remembering the address is best effort; the live row is already correct.
+  }
+}
+
 async function fetchAntigravityLimits(options = {}, deps = {}) {
   const nowMs = (deps.now || Date.now)();
   const probeFn = deps.antigravityProbe || antigravityProbe.probe;
@@ -118,10 +163,28 @@ async function fetchAntigravityLimits(options = {}, deps = {}) {
       || (!scope.accountKey || scope.accountKey === account.accountKey)
       && (!scope.accountEmail || scope.accountEmail === account.accountEmail));
 
+  // Every configured managed account, disabled ones included: a remembered
+  // local address the user already manages (or switched off) is not offered a
+  // second time as a separate identity.
+  const managedKeys = new Set(antigravityOAuth.normalizeManagedAccounts(
+    options.antigravityManagedAccounts || deps.antigravityManagedAccounts
+  ).map((account) => account.accountKey).filter(Boolean));
+  const remembered = rememberedLocalAccount(deps);
+  const rememberedOffered = remembered
+    && !managedKeys.has(remembered.accountKey)
+    && scope?.sourceDetail !== 'oauth'
+    && (!scope || (!scope.accountKey || scope.accountKey === remembered.accountKey)
+      && (!scope.accountEmail || scope.accountEmail.toLowerCase() === remembered.accountEmail))
+    ? remembered
+    : null;
+
   if (accounts.length === 0 && !scope) {
     try {
-      return mapAntigravitySnapshot(await probeFn(deps), { nowMs, source: 'rpc' });
+      const local = mapAntigravitySnapshot(await probeFn(deps), { nowMs, source: 'rpc' });
+      observeLocalAccount(local, deps);
+      return local;
     } catch (error) {
+      if (rememberedOffered) return rememberedLocalProvider(rememberedOffered, error, nowMs);
       return normalizeLimitProvider({
         provider: 'antigravity',
         accountKey: '',
@@ -157,6 +220,11 @@ async function fetchAntigravityLimits(options = {}, deps = {}) {
   }));
   const [local, remote] = await Promise.all([localPromise, remotePromise]);
   const providers = [...remote];
+  if (local?.accountKey) observeLocalAccount(local, deps);
+  if (!local?.accountKey && rememberedOffered && scope?.sourceDetail !== 'oauth'
+    && !providers.some((provider) => provider.accountKey === rememberedOffered.accountKey)) {
+    providers.unshift(rememberedLocalProvider(rememberedOffered, null, nowMs));
+  }
   if (local?.accountKey) {
     const duplicateIndex = providers.findIndex((provider) => provider.accountKey === local.accountKey);
     if (duplicateIndex >= 0) {
