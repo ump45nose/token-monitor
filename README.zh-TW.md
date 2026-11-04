@@ -30,7 +30,7 @@
 
 ## 什麼是 Token Monitor？
 
-一款桌面應用程式，即時顯示 Claude Code、Codex、Cursor、GitHub Copilot、Cherry Studio 等 49+ 種 AI 編程工具的 Token 用量與 AI 工具額度，具備即時多裝置同步與歷史使用趨勢功能，並支援依工具、裝置、模型、session 或專案分項顯示。它會出現在你目光所及之處：主視窗、MacBook 瀏海、選單列或系統匣、螢幕邊緣、懸浮小窗，以及原生 macOS 小工具。
+一款桌面應用程式，即時顯示 Claude Code、Codex、Cursor、GitHub Copilot、Cherry Studio 等 50+ 種 AI 編程工具的 Token 用量與 AI 工具額度，具備即時多裝置同步與歷史使用趨勢功能，並支援依工具、裝置、模型、session 或專案分項顯示。它會出現在你目光所及之處：主視窗、MacBook 瀏海、選單列或系統匣、螢幕邊緣、懸浮小窗，以及原生 macOS 小工具。
 
 ## 支援的工具
 
