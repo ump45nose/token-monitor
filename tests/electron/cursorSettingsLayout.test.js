@@ -268,7 +268,7 @@ test('Cursor removal is available for manual accounts and expired desktop import
   assert.match(logout, /cursorProbe\.probe\(account\.sessionToken\)[\s\S]*?probeResult\.error\?\.kind !== 'unauthorized'/);
   assert.match(logout, /dismissedToken = cursorAuth\.cursorTokenFingerprint\(account\.sessionToken\)/);
   assert.match(logout, /settings\.cursorDismissedDesktopTokens = normalizeCursorDismissedTokenFingerprints\(\[/);
-  const statusBody = functionBody(main, 'cursorStatusValue', 'rebuildWindow');
+  const statusBody = functionBodyBeforeMarker(main, 'cursorStatusValue', '// Plugin hosts load');
   assert.match(statusBody, /dismissedTokenFingerprints: normalizeCursorDismissedTokenFingerprints\(settings\?\.cursorDismissedDesktopTokens\)/);
   assert.match(main, /ipcMain\.handle\('cursor:loginManual'[\s\S]*?if \(isExternalAgentActive\(\)\)/);
   assert.match(main, /ipcMain\.handle\('cursor:logout'[\s\S]*?if \(isExternalAgentActive\(\)\)/);
