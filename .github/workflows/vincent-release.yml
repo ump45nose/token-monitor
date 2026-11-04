@@ -1,0 +1,185 @@
+name: Vincent release
+
+# Follows Javis603/token-monitor releases: rebuilds vincent/release from the
+# newest upstream vX.Y.Z plus vincent/branches.txt (scripts/vincent-release.sh
+# on the vincent/release-tools branch), runs lint and tests, then builds the
+# macOS arm64 app and publishes it as a release of this fork. A conflict or a
+# failed check opens (or updates) an issue here instead.
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Upstream tag to build (default: newest release)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: vincent-release
+  cancel-in-progress: false
+
+env:
+  TOOLS_REF: vincent/release-tools
+  GIT_AUTHOR: 'Vincent <1729065730@qq.com>'
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.plan.outputs.publish }}
+      sha: ${{ steps.plan.outputs.sha }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+    env:
+      TM_OUT: ${{ github.workspace }}/vincent-out
+      TM_REPO: ${{ github.workspace }}/repo
+      TM_UPSTREAM_REMOTE: upstream
+      TM_FORK_REMOTE: origin
+    steps:
+      - name: Check out the fork
+        uses: actions/checkout@v5
+        with:
+          path: repo
+          ref: ${{ env.TOOLS_REF }}
+          fetch-depth: 0
+
+      - name: Check out the release tools
+        uses: actions/checkout@v5
+        with:
+          path: tools
+          ref: ${{ env.TOOLS_REF }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+
+      - name: Add the upstream remote
+        working-directory: repo
+        run: git remote add upstream https://github.com/Javis603/token-monitor.git
+
+      - name: Rebuild, lint and test
+        id: build
+        run: |
+          set +e
+          tools/scripts/vincent-release.sh build ${{ inputs.tag && format('--tag {0}', inputs.tag) || '' }}
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          [ -f "$TM_OUT/report.md" ] && cat "$TM_OUT/report.md" >> "$GITHUB_STEP_SUMMARY"
+          exit $code
+
+      - name: Plan the release
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(cat "$TM_OUT/tag")"
+          if [ "$(tools/scripts/vincent-release.sh changed)" = true ]; then
+            version="$(tools/scripts/vincent-release.sh next-version)"
+            tools/scripts/vincent-release.sh stamp "$version" >/dev/null
+            sha="$(tools/scripts/vincent-release.sh publish-branch)"
+            echo "Rebuilt vincent/release as $version ($sha)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            sha="$(git -C repo rev-parse origin/vincent/release)"
+            version="$(git -C repo show "$sha:package.json" | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')"
+            echo "vincent/release is already this build ($version, $sha)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if gh release view "v$version" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            publish=false
+            echo "Release v$version already exists; nothing to publish." >> "$GITHUB_STEP_SUMMARY"
+          else
+            publish=true
+          fi
+          { echo "publish=$publish"; echo "sha=$sha"; echo "version=$version"; echo "tag=$tag"; } >> "$GITHUB_OUTPUT"
+
+      - name: Open or update an issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODE: ${{ steps.build.outputs.code }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          tag="$(cat "$TM_OUT/tag" 2>/dev/null || echo unknown)"
+          case "$CODE" in
+            10) what="merge conflict" ;;
+            11) what="lint or tests failed" ;;
+            12) what="branch missing from the fork" ;;
+            *) what="integration job failed" ;;
+          esac
+          title="[vincent-release] $tag: $what"
+          body="$( { echo "Run: $RUN_URL"; echo; cat "$TM_OUT/report.md" 2>/dev/null; } )"
+          existing="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -1)"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" -R "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
+
+  macos:
+    needs: integrate
+    if: needs.integrate.outputs.publish == 'true'
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.integrate.outputs.version }}
+      UPSTREAM_TAG: ${{ needs.integrate.outputs.tag }}
+      SHA: ${{ needs.integrate.outputs.sha }}
+    steps:
+      - name: Check out vincent/release
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.integrate.outputs.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Fetch the pinned tokscale binary
+        run: |
+          npm run ensure:tokscale -- --platform=darwin-arm64
+          node scripts/verify-vendored-tokscale.js
+
+      - name: Build the macOS arm64 app
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          CSC_LINK: ${{ secrets.VINCENT_MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.VINCENT_MAC_CSC_KEY_PASSWORD }}
+        run: |
+          [ -n "$CSC_LINK" ] || unset CSC_LINK CSC_KEY_PASSWORD
+          npx electron-builder --config vincent/electron-builder.mac.js --mac --arm64 --publish never
+          ls -la dist
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/*.dmg dist/*.zip dist/*.blockmap dist/latest-mac.yml)
+          [ ${#files[@]} -ge 3 ] || { echo "missing build outputs" >&2; exit 1; }
+          notes="Vincent build of Token Monitor on upstream [$UPSTREAM_TAG](https://github.com/Javis603/token-monitor/releases/tag/$UPSTREAM_TAG), built from [vincent/release@${SHA:0:8}](https://github.com/$GITHUB_REPOSITORY/commit/$SHA). The branch list is vincent/branches.txt on vincent/release-tools.
+
+          macOS arm64 only, ad-hoc signed and not notarized: open it once with right-click > Open, or clear the quarantine flag."
+          gh release create "v$VERSION" -R "$GITHUB_REPOSITORY" --target "$SHA" \
+            --title "Token Monitor $VERSION (Vincent build on $UPSTREAM_TAG)" --notes "$notes" --latest "${files[@]}"
+
+      - name: Open an issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="[vincent-release] $UPSTREAM_TAG: macOS build or release failed"
+          existing="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -1)"
+          body="Run: $RUN_URL (version $VERSION, commit $SHA)"
+          if [ -n "$existing" ]; then gh issue comment "$existing" -R "$GITHUB_REPOSITORY" --body "$body"
+          else gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "$body"; fi
