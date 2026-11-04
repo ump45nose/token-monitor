@@ -130,7 +130,7 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "Javis603",
+        "owner": "ump45nose",
         "repo": "token-monitor"
       }
     ]
