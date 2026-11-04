@@ -1,0 +1,13 @@
+# Fork branches merged onto each upstream release by scripts/vincent-release.sh.
+# Format: <branch on ump45nose/token-monitor>   # upstream PR / note
+# Order matters. Blank lines and text after '#' are ignored.
+# Drop a line once upstream has shipped it; the script also skips branches the
+# release tag already contains.
+vincent/release-tools                # this script and manifest
+vincent/fork-updater                 # in-app update check follows ump45nose/token-monitor releases
+feat/claude-desktop-local            # PR #1126 (the build both Macs run today)
+feat/cursor-forget-stale-accounts    # PR #1348
+feat/billing-cycle-range             # PR #1300
+feat/openai-subscription-credit      # PR #1355
+vincent/qodercn-cli-credits-v0.85    # PR #1057 merged onto v0.85.0, tokscale pinned to ump45nose/tokscale (tokscale PR #16)
+vincent/antigravity-fixes            # c95301fb 776fcc4c 6ed8d133 from air/0.84.1-custom, no upstream PR yet
