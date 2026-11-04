@@ -335,6 +335,7 @@ test('the external URL allowlist admits exactly the provider consoles it should'
       isAllowedVerificationUrl,
       isAllowedCodexLoginUrl,
       limitProviderUrlAllowed,
+      APP_RELEASE_REPO: 'example-owner/token-monitor',
       STATUS_PAGE_HOSTS: new Set(SERVICE_STATUS_PROVIDERS.map((provider) => new URL(provider.pageUrl).hostname))
     }
   );
@@ -382,6 +383,8 @@ test('the external URL allowlist admits exactly the provider consoles it should'
     'https://status.deepseek.com/',
     'https://github.com/junhoyeo/tokscale',
     'https://github.com/Javis603/token-monitor/releases',
+    'https://github.com/example-owner/token-monitor',
+    'https://github.com/example-owner/token-monitor/releases/tag/v0.85.1001',
     'https://www.npmjs.com/package/@tokscale/cli',
     'https://javis-ai.com/token-monitor',
     'https://www.javis-ai.com/token-monitor/'
@@ -427,6 +430,8 @@ test('the external URL allowlist admits exactly the provider consoles it should'
     'https://codex-resets.com/path',
     'https://github.com/junhoyeo',
     'https://github.com/Javis603/other-repo',
+    'https://github.com/example-owner/token-monitor-tools',
+    'https://github.com/example-owner/other-repo',
     'https://javis-ai.com/',
     'http://claude.ai/settings',
     'https://evil-claude.ai/settings',
