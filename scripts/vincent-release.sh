@@ -3,7 +3,7 @@
 # release: the release tag plus every fork branch in vincent/branches.txt.
 #
 #   scripts/vincent-release.sh status         [--tag vX.Y.Z]
-#   scripts/vincent-release.sh build          [--tag vX.Y.Z] [--no-install] [--no-test]
+#   scripts/vincent-release.sh build          [--tag vX.Y.Z] [--no-install | --node-modules DIR] [--no-test]
 #   scripts/vincent-release.sh changed        # true when the build differs from fork vincent/release
 #   scripts/vincent-release.sh next-version   # X.Y.((Z+1)*1000+N) for the build's upstream X.Y.Z
 #   scripts/vincent-release.sh stamp VERSION  # commit the app version onto the build
@@ -71,12 +71,13 @@ latest_tag() { # newest stable vX.Y.Z on upstream main
 }
 
 parse_opts() {
-  TAG=""; NO_INSTALL=false; NO_TEST=false
+  TAG=""; NO_INSTALL=false; NO_TEST=false; NODE_MODULES=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --tag) TAG="${2:-}"; shift ;;
       --no-install) NO_INSTALL=true ;;
       --no-test) NO_TEST=true ;;
+      --node-modules) NODE_MODULES="${2:-}"; NO_INSTALL=true; shift ;; # reuse an installed tree (same lockfile)
       *) die "unknown option $1" ;;
     esac
     shift
@@ -155,7 +156,10 @@ cmd_build() {
   fi
   if ((${#missing[@]})); then log "build stopped: missing branches"; return 12; fi
 
-  if ! $NO_INSTALL; then
+  if [[ -n "$NODE_MODULES" ]]; then
+    [[ -d "$NODE_MODULES" ]] || die "no node_modules at $NODE_MODULES"
+    ln -s "$(cd "$NODE_MODULES" && pwd)" "$WT/node_modules"
+  elif ! $NO_INSTALL; then
     log "npm ci"
     (cd "$WT" && npm ci --no-audit --no-fund >"$TM_OUT/npm-ci.log" 2>&1) || { report "npm ci failed; see the run log."; tail -40 "$TM_OUT/npm-ci.log" >&2; return 11; }
   fi
