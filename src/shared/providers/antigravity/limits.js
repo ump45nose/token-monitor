@@ -114,7 +114,7 @@ function antigravityAccountError(account, error, nowMs) {
 // and the collector keeps offering it as an identity-only row until the
 // language server answers again.
 function rememberedLocalAccount(deps = {}) {
-  let remembered = null;
+  let remembered;
   try {
     remembered = typeof deps.resolveAntigravityLocalAccount === 'function'
       ? deps.resolveAntigravityLocalAccount()
