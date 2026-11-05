@@ -585,7 +585,10 @@ let credentialStorageErrorShown = false;
 let antigravityOAuthLoginController = null;
 const sessionUsageArchiveStore = createSessionUsageArchiveStore({ cursorUsageEvents: createCursorUsageEventIndex() });
 let rendererViewState = normalizeInitialRendererViewState();
-const serviceStatusClient = createServiceStatusClient();
+// Cursor's status page now redirects to status.x.ai, which is unreachable from
+// mainland China without a proxy — on the global fetch that card would read
+// "Unable to check status" on exactly the networks this transport exists for.
+const serviceStatusClient = createServiceStatusClient({ fetchImpl: electronLimitsFetch() });
 const codexResetForecastClient = createCodexResetForecastClient({
   fetchImpl: electronLimitsFetch()
 });
@@ -784,6 +787,7 @@ function defaultSettings() {
     // has the flag in settings before any UI toggle. Account field initial is
     // null (omit); this line is what makes the env visible on a fresh install.
     claudeDesktopLocalOnly: parseBoolean(process.env.TOKEN_MONITOR_CLAUDE_DESKTOP_LOCAL_ONLY, false),
+    claudeCliFallbackEnabled: true,
     // The key OpenCode stores for itself needs no setup, so tracking it is the
     // default. This turns that off for a machine that is signed in to an account
     // the user does not want reported.
@@ -2757,6 +2761,7 @@ function readSettings() {
     merged.homeModuleCounts = normalizeHomeModuleCounts(merged.homeModuleCounts);
     merged.homeLimitDisplayMode = normalizeHomeLimitDisplayMode(merged.homeLimitDisplayMode);
     merged.showHomeLimitProviderNames = parseBoolean(merged.showHomeLimitProviderNames, false);
+    merged.claudeCliFallbackEnabled = parseBoolean(merged.claudeCliFallbackEnabled, true);
     merged.codexResetForecastEnabled = parseBoolean(merged.codexResetForecastEnabled, false);
     merged.workbuddyQuotaTotalEnabled = parseBoolean(merged.workbuddyQuotaTotalEnabled, false);
     merged.limitsHistoryOpenMode = ['hover', 'click', 'off'].includes(merged.limitsHistoryOpenMode) ? merged.limitsHistoryOpenMode : 'hover';
@@ -3536,13 +3541,16 @@ function limitInvalidationKey(scope) {
 }
 
 function rememberPendingLimitInvalidation(scope, reason, options = {}) {
-  const clear = options.clear === true;
   const refresh = options.refresh !== false;
   const normalized = { ...scope, provider: String(scope?.provider || '').trim().toLowerCase() };
   const key = limitInvalidationKey(normalized);
+  let clear = options.clear === true || pendingLimitInvalidations.get(key)?.clear === true;
   if (key.endsWith(':*')) {
     for (const pendingKey of pendingLimitInvalidations.keys()) {
-      if (pendingKey.startsWith(`${normalized.provider}:`)) pendingLimitInvalidations.delete(pendingKey);
+      if (pendingKey.startsWith(`${normalized.provider}:`)) {
+        clear = clear || pendingLimitInvalidations.get(pendingKey).clear;
+        pendingLimitInvalidations.delete(pendingKey);
+      }
     }
   }
   pendingLimitInvalidations.set(key, { scope: normalized, reason, clear, refresh });
@@ -8466,6 +8474,7 @@ app.whenReady().then(() => {
       // settings:update cannot drop the flag, and so limitsConfigFromSettings
       // always sees a boolean rather than an absent key.
       claudeDesktopLocalOnly: parseBoolean(patch.claudeDesktopLocalOnly ?? settings.claudeDesktopLocalOnly, false),
+      claudeCliFallbackEnabled: parseBoolean(patch.claudeCliFallbackEnabled ?? settings.claudeCliFallbackEnabled, true),
       codexResetForecastEnabled: parseBoolean(patch.codexResetForecastEnabled ?? settings.codexResetForecastEnabled, false),
       workbuddyQuotaTotalEnabled: parseBoolean(patch.workbuddyQuotaTotalEnabled ?? settings.workbuddyQuotaTotalEnabled, false),
       showCodexAdditionalLimits: parseBoolean(patch.showCodexAdditionalLimits ?? settings.showCodexAdditionalLimits, true),
