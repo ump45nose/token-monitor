@@ -45,6 +45,7 @@ jobs:
       - name: Check out the fork
         uses: actions/checkout@v5
         with:
+          token: ${{ secrets.VINCENT_PUSH_TOKEN || github.token }}
           path: repo
           ref: ${{ env.TOOLS_REF }}
           fetch-depth: 0
