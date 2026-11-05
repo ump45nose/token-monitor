@@ -5128,7 +5128,8 @@ function serviceStatusIconId(id) {
 function renderServiceStatus() {
   if (!serviceStatusSurfaceVisible()) return;
   if (!els.serviceStatusPanel) return;
-  const rows = serviceStatusRows().map((provider) => {
+  const rows = serviceStatusRows().map((source) => {
+    const provider = serviceStatusPresentationApi.localizeProvider(source, currentLocale());
     const row = document.createElement('button');
     row.type = 'button';
     row.className = `service-status-row service-status-${provider.status || 'unknown'}`;
@@ -12664,6 +12665,11 @@ const LIMIT_PROVIDER_SETTINGS = {
     key: 'claudeDesktopSplitEnabled',
     titleKey: 'settings.limits.claudeDesktopSplit',
     descKey: 'settings.limits.claudeDesktopSplitDesc',
+    defaultValue: true
+  }, {
+    key: 'claudeCliFallbackEnabled',
+    titleKey: 'settings.limits.claudeCliFallback',
+    descKey: 'settings.limits.claudeCliFallbackDesc',
     defaultValue: true
   }],
   codex: [{
