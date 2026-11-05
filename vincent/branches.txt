@@ -1,0 +1,15 @@
+# Fork branches merged onto each upstream release by scripts/vincent-release.sh.
+# Format: <branch on ump45nose/token-monitor>   # upstream PR / note
+# Order matters. Blank lines and text after '#' are ignored.
+# Drop a line once upstream has shipped it; the script also skips branches the
+# release tag already contains.
+vincent/release-tools                # this script and manifest
+vincent/fork-updater                 # in-app update check follows ump45nose/token-monitor releases
+vincent/claude-desktop-local-v0.86   # PR #1126 (6fa6fe16, the build both Macs run today) with v0.86.0 merged: Desktop settings kept beside the Claude CLI fallback toggle
+vincent/cursor-forget-stale-accounts-v0.85 # PR #1348 merged onto v0.85.0, test slice no longer assumes rebuildWindow follows
+feat/billing-cycle-range             # PR #1300
+feat/openai-subscription-credit      # PR #1355
+vincent/integration-fixups-v0.86     # #1126 + #1355 with the README tool count bumped to 50, on the v0.86.0 port of #1126
+vincent/qodercn-cli-credits-v0.86    # PR #1057 merged onto v0.85.0, then v0.86.0 (runtimeConfig tests kept from both)
+vincent/archive-alias-dedupe         # on top of #1057: a model stored under two spellings (qfmodel / Qwen3.8-Flash) counts once
+vincent/antigravity-fixes            # c95301fb 776fcc4c 6ed8d133 from air/0.84.1-custom, no upstream PR yet
