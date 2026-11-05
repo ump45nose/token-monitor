@@ -1089,6 +1089,8 @@ function electronLimitsDeps() {
     resolveClaudeWebCredential: (account) => claudeAccountService().resolveCredential(account),
     onStepfunTokenRenewed: persistStepfunTokenRenewal,
     onAntigravityCredentialsRenewed: persistAntigravityCredentialsRenewal,
+    resolveAntigravityLocalAccount: () => settings?.antigravityLocalAccount || null,
+    onAntigravityLocalAccountObserved: persistAntigravityLocalAccount,
     resolveWorkbuddyManagedCredential: (account, options) => workbuddyAccountService().resolveCredential(account, options),
     onThirdPartyCredentialsRenewed: persistThirdPartyCredentialsRenewal,
     onThirdPartyAccountKeyResolved: persistThirdPartyAccountKey
@@ -1372,6 +1374,18 @@ function persistAntigravityCredentialsRenewal({ account, credentials, previous }
   const current = readAntigravityCredential(accountId);
   if (!current || JSON.stringify(current) !== JSON.stringify(previous || {})) return false;
   return writeAntigravityCredential(accountId, credentials);
+}
+
+// The address (never a token) the local Antigravity language server last
+// reported, so this device's own sign-in stays selectable while agy is closed
+// and across restarts. Only written when it changes.
+function persistAntigravityLocalAccount({ accountEmail } = {}) {
+  const email = String(accountEmail || '').trim().toLowerCase();
+  if (!settings || !email || !email.includes('@')) return false;
+  if (String(settings.antigravityLocalAccount?.accountEmail || '').toLowerCase() === email) return true;
+  settings.antigravityLocalAccount = { accountEmail: email, seenAt: new Date().toISOString() };
+  saveSettings();
+  return true;
 }
 
 async function addAntigravityManagedAccount() {
