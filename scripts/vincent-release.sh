@@ -189,8 +189,10 @@ cmd_build() {
 
 require_build() { [[ -s "$TM_OUT/build-sha" && -d "$WT" ]] || die "run build first"; }
 
-release_trailer() { # $1 = commit, $2 = trailer key
-  g log -1 --format=%B "$1" 2>/dev/null | sed -n "s/^$2: *//p" | tail -1
+release_trailer() { # $1 = commit, $2 = trailer key; prints nothing when $1 does not exist yet
+  local body
+  body="$(g log -1 --format=%B "$1" 2>/dev/null)" || return 0
+  sed -n "s/^$2: *//p" <<<"$body" | tail -1
 }
 
 cmd_changed() {
