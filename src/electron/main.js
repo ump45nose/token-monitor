@@ -247,6 +247,7 @@ const {
   latestFromUpdaterInfo,
   mergeLatestReleaseMetadata,
   providerUpdateCheckAvailability,
+  GITHUB_REPO: APP_RELEASE_REPO,
   RELEASES_URL,
   resolveAppUpdateCheckError,
   shouldDownloadAutomaticAppUpdate,
@@ -7611,6 +7612,9 @@ function isAllowedExternalUrl(value) {
   if (parsed.hostname === 'github.com' && parsed.pathname.startsWith('/junhoyeo/tokscale')) return true;
   if (parsed.hostname === 'www.npmjs.com' && parsed.pathname.startsWith('/package/@tokscale/')) return true;
   if (parsed.hostname === 'github.com' && parsed.pathname.startsWith('/Javis603/token-monitor')) return true;
+  // The release feed the updater follows (build.publish); its notes link there.
+  if (parsed.hostname === 'github.com'
+    && (parsed.pathname === `/${APP_RELEASE_REPO}` || parsed.pathname.startsWith(`/${APP_RELEASE_REPO}/`))) return true;
   if (parsed.hostname === 'codex-resets.com' && (parsed.pathname === '' || parsed.pathname === '/')) return true;
   if (
     (parsed.hostname === 'javis-ai.com' || parsed.hostname === 'www.javis-ai.com')
