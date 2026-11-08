@@ -13,3 +13,4 @@ vincent/integration-fixups-v0.86     # #1126 + #1355 with the README tool count 
 vincent/qodercn-cli-credits-v0.86    # PR #1057 merged onto v0.85.0, then v0.86.0 (runtimeConfig tests kept from both)
 vincent/archive-alias-dedupe         # on top of #1057: a model stored under two spellings (qfmodel / Qwen3.8-Flash) counts once
 vincent/antigravity-fixes            # c95301fb 776fcc4c 6ed8d133 from air/0.84.1-custom, no upstream PR yet
+fix/grok-cli-default-paths           # PR #1415
