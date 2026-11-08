@@ -30,7 +30,7 @@
 
 ## Token Monitor 是什么？
 
-一款桌面应用，实时显示 Claude Code、Codex、Cursor、GitHub Copilot、Cherry Studio 等 50+ 种 AI 编程工具的 Token 用量与 AI 工具额度，具备实时多设备同步与历史使用趋势功能，并支持按工具、设备、模型、session 或项目分项显示。它出现在你目光所及之处：主窗口、MacBook 刘海、菜单栏或系统托盘、屏幕边缘、悬浮小窗，以及原生 macOS 小部件。
+一款桌面应用，实时显示 Claude Code、Codex、Cursor、GitHub Copilot、Cherry Studio 等 53+ 种 AI 编程工具的 Token 用量与 AI 工具额度，具备实时多设备同步与历史使用趋势功能，并支持按工具、设备、模型、session 或项目分项显示。它出现在你目光所及之处：主窗口、MacBook 刘海、菜单栏或系统托盘、屏幕边缘、悬浮小窗，以及原生 macOS 小部件。
 
 ## 支持的工具
 
@@ -76,6 +76,9 @@
     <img src=".github/assets/tools-icon/devin.png" width="40" alt="Devin" title="Devin" />
     <img src=".github/assets/tools-icon/fx.png" width="40" alt="fx" title="fx" />
     <img src=".github/assets/tools-icon/minimax.png" width="40" alt="MiniMax" title="MiniMax" />
+    <img src=".github/assets/tools-icon/mistral.png" width="40" alt="Mistral Vibe" title="Mistral Vibe" />
+    <img src=".github/assets/tools-icon/prime-agent.png" width="40" alt="Prime Agent" title="Prime Agent" />
+    <img src=".github/assets/tools-icon/jcode.png" width="40" alt="Jcode" title="Jcode" />
     <img src=".github/assets/tools-icon/typesafe.png" width="40" alt="TypeSafe" title="TypeSafe" />
     <img src=".github/assets/tools-icon/openrouter.png" width="40" alt="OpenRouter" title="OpenRouter" />
     <img src=".github/assets/tools-icon/volcengine.png" width="40" alt="Volcengine" title="Volcengine" />
@@ -85,7 +88,7 @@
     <img src=".github/assets/tools-icon/stepfun.png" width="40" alt="StepFun" title="StepFun" />
     <img src=".github/assets/tools-icon/notion.png" width="40" alt="Notion AI" title="Notion AI" />
     <img src=".github/assets/tools-icon/manus.png" width="40" alt="Manus" title="Manus" />
-    <img src=".github/assets/tools-icon/openai.png" width="40" alt="OpenAI" title="OpenAI" />
+    <img src=".github/assets/tools-icon/opendesign.png" width="40" alt="OpenDesign" title="OpenDesign" />
     <img src=".github/assets/tools-icon/thirdparty.gif" width="40" alt="第三方 API" title="第三方 API" />
 </p>
 
@@ -156,7 +159,7 @@ brew install --cask token-monitor
 
 ### 用量追踪
 
-- **实时 Token 追踪**：Claude Code、Codex、Cursor、GitHub Copilot、Antigravity、OpenCode 等 39+ 种 AI 工具，每轮对话后 UI 在数秒内刷新（完整列表见上方表格）
+- **实时 Token 追踪**：Claude Code、Codex、Cursor、GitHub Copilot、Antigravity、OpenCode 等 42+ 种 AI 工具，每轮对话后 UI 在数秒内刷新（完整列表见上方表格）
 - **实时 Token 速率**：可选显示的实时读数，以 `tok/s` 显示生成速度或以 `tok/min` 显示总消耗
 - **单个 session 明细**：点进某个 session，可看每条提问的 Token 消耗，并展开查看每次回复的 Token 拆分与用到的工具（打开时才实时读取本机 transcript 或数据库，绝不同步）
 - **缓存命中统计**：点击任何工具或模型，展开查看输入 Token（缓存命中与未命中）、输出 Token 的详细分类及命中率百分比
@@ -166,7 +169,7 @@ brew install --cask token-monitor
 
 ### 额度、趋势与导出
 
-- **AI 工具额度检测**：涵盖 Claude Code、Codex、Cursor、OpenRouter、第三方 API、GLM、Kimi 等 32+ 家提供方的 session、每日、每周、账单与 credits 窗口，支持多个 OpenRouter／第三方 profile，以及余额型账户（Claude credits、DeepSeek 预付余额与消费历史、第三方余额）
+- **AI 工具额度检测**：涵盖 Claude Code、Codex、Cursor、OpenRouter、第三方 API、GLM、Kimi 等 33+ 家提供方的 session、每日、每周、账单与 credits 窗口，支持多个 OpenRouter／第三方 profile，以及余额型账户（Claude credits、DeepSeek 预付余额与消费历史、第三方余额）
 - **多账号与 Codex 账号切换**：同一提供方可追踪多个账号、各自显示额度；已加入追踪的 Codex 账号还能一键切换为本机使用账号，免重新登录授权
 - **Codex 重置预测**：可选开启的第三方重置预测，显示预计重置时间、重置类型（Regular 或 Banked）与上次重置时间
 - **保留已删除会话用量**：许多工具会定期清除旧 session（Claude Code 默认清 30 天前的 transcript），一删就再也算不到。开启后，Token Monitor 会在本地不设期限地归档已观测到的每日工具／模型用量，让热力图与趋势即使在来源文件被清掉后仍然完整（详见下方[〈会话数据保留期〉](#会话数据保留期)）
@@ -250,6 +253,9 @@ Token Monitor 对 Token 用量、账户额度和 session 明细分别支持：
 | <img src=".github/assets/tools-icon/devin.png" width="28" alt="Devin" /> | Devin CLI / Devin Desktop | `~/.local/share/devin/cli/sessions.db`, `<platform-app-data>/Devin/User/acp-events/` | ✅ | ✅ | — |
 | <img src=".github/assets/tools-icon/fx.png" width="28" alt="fx" /> | fx | `~/.fx/sessions/` | ✅ | — | — |
 | <img src=".github/assets/tools-icon/minimax.png" width="28" alt="MiniMax" /> | MiniMax / MiniMax Code | `~/.minimax/v2/sessions/` | ✅ | ✅ | — |
+| <img src=".github/assets/tools-icon/mistral.png" width="28" alt="Mistral" /> | Mistral Vibe | `$VIBE_HOME/logs/session/` (`~/.vibe/logs/session/`); Mistral Admin Cookie（Included API／Vibe 每月额度和点数余额） | ✅ | ✅ | — |
+| <img src=".github/assets/tools-icon/prime-agent.png" width="28" alt="Prime Agent" /> | Prime Agent | `~/.prime/agent/` (`sessions/`, `session-artifacts/`) | ✅ | — | — |
+| <img src=".github/assets/tools-icon/jcode.png" width="28" alt="Jcode" /> | Jcode | `~/.jcode/sessions/` | ✅ | — | — |
 | <img src=".github/assets/tools-icon/typesafe.png" width="28" alt="TypeSafe" /> | TypeSafe | TypeSafe Console Cookie（账单余额及根据 token 用量估算花费） | — | ✅ | — |
 | <img src=".github/assets/tools-icon/openrouter.png" width="28" alt="OpenRouter" /> | OpenRouter | OpenRouter API 密钥（查询用量／密钥上限；获授权访问 credits 时显示余额，官方文档指定 Management 密钥） | — | ✅ | — |
 | <img src=".github/assets/tools-icon/volcengine.png" width="28" alt="Volcengine" /> | Volcengine | Ark API key 或火山引擎 AK/SK（通过火山引擎 API 查询火山方舟 Coding Plan / Agent Plan 额度） | — | ✅ | — |
@@ -259,7 +265,7 @@ Token Monitor 对 Token 用量、账户额度和 session 明细分别支持：
 | <img src=".github/assets/tools-icon/stepfun.png" width="28" alt="StepFun" /> | StepFun | StepFun Oasis-Token（Coding Plan／Token Plan 额度） | — | ✅ | — |
 | <img src=".github/assets/tools-icon/notion.png" width="28" alt="Notion AI" /> | Notion AI | Notion AI 滚动／每月额度，仅限 Business/Enterprise；手动 token_v2 Cookie + 明确的工作区 ID | — | ✅ | — |
 | <img src=".github/assets/tools-icon/manus.png" width="28" alt="Manus" /> | Manus | Manus 积分（月度 + 每日／周期刷新额度 + 余额）；桌面会话（macOS／Windows）或手动网页会话（所有 OS） | — | ✅ | — |
-| <img src=".github/assets/tools-icon/openai.png" width="28" alt="OpenAI" /> | OpenAI | Admin API key；按订阅刷新日，用 ChatGPT Pro 的公开额度（Pro 5x $100、Pro 20x $200、Pro 50x $500）减去组织 Costs 后的 API credit 估算 | — | ✅ | — |
+| <img src=".github/assets/tools-icon/opendesign.png" width="28" alt="OpenDesign" /> | OpenDesign | 当前工作区的 5 小时／每周订阅额度；手动 Cookie | — | ✅ | — |
 | <img src=".github/assets/tools-icon/thirdparty.gif" width="28" alt="第三方 API" /> | 第三方 API | New API / Sub2API 兼容账号预设方案（包括兼容的 One API 分支）、New API 密钥预设方案与自定义余额端点 | — | ✅ | — |
 
 <details>
@@ -277,7 +283,6 @@ Token Monitor 对 Token 用量、账户额度和 session 明细分别支持：
 - Devin 从本地 `sessions.db` 追踪 Devin CLI 会话，并从 `acp-events` ACP 日志追踪 Devin Desktop 代理会话；同一 session 两边都有数据时以 CLI 数据库为准。Desktop 的覆盖范围取决于连接的 ACP 代理：只有会在本地写入 `usage_update` 事件的代理才会计入，而 Devin Desktop 默认的 `devin-cloud` 代理在服务端计量，因此默认的 Desktop 配置不会报告 Desktop token。session 标题与项目归属取自 CLI 数据库。详见 [Devin 数据来源说明](docs/providers/devin.md)。
 - Notion AI 使用内部 API，需要手动粘贴 `token_v2` Cookie 和明确的 Business/Enterprise 工作区 ID。目前仅以测试数据验证，尚无真实响应样本，实际登录验证待批准。不会自动获取 Cookie，也不保证公开 API 兼容性。详见 [Notion 数据来源说明](docs/providers/notion.md)。
 - Manus 支持 macOS／Windows 桌面会话自动读取，所有 OS（含 Linux）也可手动输入网页会话。月度积分、刷新额度与余额使用相同的未公开内部接口，不保证兼容性。详见 [Manus 数据来源说明](docs/providers/manus.md)。
-- OpenAI 按 UTC 订阅刷新日估算已关联的 ChatGPT Pro API credit：整周期公开额度（Pro 5x $100、Pro 20x $200、Pro 50x $500）减去该周期内的组织 Costs。它不是账单页余额，也不按首次按比例发放折算。详见 [OpenAI 数据来源说明](docs/providers/openai.md)。
 - MiniMax Code 读取 CLI 写入的本地会话记录，位于 `~/.minimax` 或 `MINIMAX_DATA_DIR` / `MAVIS_DATA_DIR`（也包括 `~/.mavis` 与 `~/.minimax-<profile>` / `~/.mavis-<profile>`），并加上通过 `tokscale headless mcode` 捕获的运行；两边都有的同一轮只计一次。
 
 - Command Code transcript 不包含实际 Token 数或每条消息的模型信息。Token 用量根据 transcript 文本估算；模型归属与推算成本可能反映当前配置的模型，而不是每次请求当时实际使用的模型。

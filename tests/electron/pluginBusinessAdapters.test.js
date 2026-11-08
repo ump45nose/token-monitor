@@ -143,11 +143,9 @@ test('App business context captures host calendar/rates and rate changes republi
   let publishes = 0;
   const context = { settings: { currencyRates: { HKD: 8 } }, rateCache: null, effectiveRates: null,
     CURRENCY_CODES: currency.CURRENCY_CODES, resolveEffectiveRates: currency.resolveEffectiveRates,
-    configureRates: () => {}, pluginRuntime: { refreshBusinessData() { publishes++; } },
+    configureRates: () => {}, deviceRuntimeHandle: null, pluginRuntime: { refreshBusinessData() { publishes++; } },
     subscriptionDisplay: { todayString: () => '2026-10-23' }, effectiveSubscriptions: () => [],
-    statsHistoryRevision: stats => stats.historyRevision, trayMenuLocale: () => 'en', Intl,
-    // No device runtime yet: the Qoder CN FX reconfigure branch stays idle.
-    deviceRuntimeHandle: null };
+    statsHistoryRevision: stats => stats.historyRevision, trayMenuLocale: () => 'en', Intl };
   vm.createContext(context);
   vm.runInContext(functionSource('applyEffectiveRates'), context);
   const start = main.indexOf('extras: stats =>', main.indexOf('        businessAdapters:'));

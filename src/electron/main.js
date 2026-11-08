@@ -195,6 +195,7 @@ const {
   rendererOmittedAccountKeys
 } = require('./limits/accountSettings');
 const { createCredentialCommands } = require('./limits/credentialCommands');
+const { createMinimaxApiKeys } = require('./providers/minimax/apiKeys');
 const { createClaudeManagedAccounts, claudeAccountChangeScope } = require('./providers/claude/managedAccounts');
 const { copilotLoginErrorMessage, isAllowedVerificationUrl, runCopilotDeviceFlowLogin } = require('../shared/providers/copilot/deviceFlow');
 const {
@@ -255,7 +256,6 @@ const {
 } = require('../shared/appUpdater');
 const cursorAuth = require('../shared/providers/cursor/auth');
 const cursorProbe = require('../shared/providers/cursor/probe');
-const { normalizeCursorDismissedTokenFingerprints } = require('../shared/providers/cursor/account');
 const { stepfunToken } = require('../shared/providers/stepfun/limits');
 const opencodeWeb = require('../shared/providers/opencode/web');
 const opencodeGoApi = require('../shared/providers/opencode/goApi');
@@ -324,7 +324,8 @@ const {
   HUB_STREAM_VERSION,
   createStatsStreamReceiver
 } = require('../shared/hubProtocol');
-const { postSyncPayload, syncPayload } = require('../shared/syncPayload');
+const { createSyncPayloadUploader, syncPayload } = require('../shared/syncPayload');
+const postSyncPayload = createSyncPayloadUploader();
 const { mergedLocalAllTimeSessions } = require('../shared/localSessions');
 const {
   MIMO_PLATFORM_CONSOLE_URL,
@@ -410,6 +411,7 @@ const { createSyncUploadScheduler, normalizeSyncUploadIntervalMs } = require('./
 const { createLatestWinsReconciler } = require('./latestWinsReconciler');
 const { createIcloudSyncStore } = require('./icloudSync');
 const { createIcloudSyncRuntime } = require('./icloudSyncRuntime');
+const { isCursorDetectedAccountCurrent } = require('../shared/providers/cursor/account');
 const {
   classifySettingsChange,
   diagnosticConfigurationFromSettings,
@@ -481,7 +483,8 @@ const {
   normalizeEdgeDockMode,
   normalizeEdgeDockOffset,
   normalizeEdgeDockSide,
-  normalizeEdgeDockSize
+  normalizeEdgeDockSize,
+  normalizeEdgeDockBubbleSize
 } = require('./edgeDock/geometry');
 const { buildEdgeDockCells } = require('./renderer/edgeDock/presentation');
 const edgeDockPresentationApi = require('./renderer/edgeDock/presentation');
@@ -552,7 +555,7 @@ function appWindowIcon() {
 const DEFAULT_WINDOW = { width: 340, height: 650 };
 const WINDOW_LIMITS = { minWidth: 240, minHeight: 140, maxWidth: 1200, maxHeight: 1400 };
 const ZOOM_LIMITS = { min: 0.7, max: 1.6, step: 0.1 };
-const TRAY_CONTENT_VALUES = new Set(['tokens', 'cost', 'both', 'tokensAll', 'costAll', 'bothAll', 'limitsAllSessions', 'liveTokenRate', 'bars', 'barsSession', 'barsWeekly', 'barsAllSessions', 'icon', 'custom']);
+const TRAY_CONTENT_VALUES = new Set(['tokens', 'cost', 'both', 'tokensMonth', 'costMonth', 'bothMonth', 'tokensAll', 'costAll', 'bothAll', 'limitsAllSessions', 'liveTokenRate', 'bars', 'barsSession', 'barsWeekly', 'barsAllSessions', 'icon', 'custom']);
 const HUB_MODE_VALUES = new Set(['local', 'client', 'host', 'icloud']);
 const LANGUAGE_VALUES = new Set(LANGUAGE_OPTIONS.map((option) => option.value));
 const COLLECTION_MODE_VALUES = new Set(['live', 'smart', 'interval']);
@@ -714,6 +717,8 @@ function defaultSettings() {
     edgeDockMacBackdrop: 'inherit',
     edgeDockWindowsBackdrop: 'inherit',
     edgeDockSize: 'medium',
+    edgeDockBubbleSize: 'inherit',
+    edgeDockBubbleCustomScale: 1,
     edgeDockCustomScale: 1,
     edgeDockSide: 'right',
     edgeDockFloatingX: null,
@@ -784,13 +789,11 @@ function defaultSettings() {
     limitsRefreshMode: normalizeLimitsRefreshMode(process.env.TOKEN_MONITOR_LIMITS_REFRESH_MODE),
     limitsRefreshMs: normalizeLimitsRefreshMs(process.env.TOKEN_MONITOR_LIMITS_REFRESH_MS),
     cursorManualAccountIds: [],
-    // Fingerprints of desktop-imported Cursor sign-ins the user removed, so
-    // discovery does not import the same token again.
-    cursorDismissedDesktopTokens: [],
     showLimitSource: parseBoolean(process.env.TOKEN_MONITOR_SHOW_LIMIT_SOURCE, false),
     maskLimitAccountEmails: false,
     limitsHistoryOpenMode: 'hover',
     claudePrepaidBalanceEnabled: parseBoolean(process.env.TOKEN_MONITOR_CLAUDE_PREPAID_BALANCE, true),
+    claudeCliFallbackEnabled: true,
     // Carve Claude Desktop sessions out of the Claude Code usage row (default on).
     // Off restores upstream behaviour: Desktop transcripts stay under `claude`.
     claudeDesktopSplitEnabled: parseBoolean(process.env.TOKEN_MONITOR_CLAUDE_DESKTOP_SPLIT, true),
@@ -798,7 +801,6 @@ function defaultSettings() {
     // has the flag in settings before any UI toggle. Account field initial is
     // null (omit); this line is what makes the env visible on a fresh install.
     claudeDesktopLocalOnly: parseBoolean(process.env.TOKEN_MONITOR_CLAUDE_DESKTOP_LOCAL_ONLY, false),
-    claudeCliFallbackEnabled: true,
     // The key OpenCode stores for itself needs no setup, so tracking it is the
     // default. This turns that off for a machine that is signed in to an account
     // the user does not want reported.
@@ -2173,11 +2175,11 @@ function migrateLimitProviders(value) {
   // Saved provider selections are user intent. Normalize ids, but do not expand
   // older defaults into today's full provider list because the saved shape is
   // indistinguishable from a deliberate "only these providers" choice.
-  return parseLimitProviders(value).join(',');
+  return require('./plugins/limits').desktopProviderPreference(value, parseLimitProviders);
 }
 
 function migrateLimitProviderOrder(value) {
-  return parseLimitProviders(value).join(',') || defaultLimitProviderOrder();
+  return require('./plugins/limits').desktopProviderPreference(value, parseLimitProviders) || defaultLimitProviderOrder();
 }
 
 function migrateHomeLimitProviderOrder(value) {
@@ -2879,7 +2881,6 @@ function readSettings() {
     merged.vendorColors = migrateVendorColors(merged.vendorColors);
     merged.cursorDisabledAccountIds = normalizeCursorDisabledAccountIds(merged.cursorDisabledAccountIds);
     merged.cursorManualAccountIds = normalizeCursorAccountIds(merged.cursorManualAccountIds);
-    merged.cursorDismissedDesktopTokens = normalizeCursorDismissedTokenFingerprints(merged.cursorDismissedDesktopTokens);
     merged.hubHostPort = normalizeHubPort(merged.hubHostPort);
     merged.hubHostSecret = typeof merged.hubHostSecret === 'string' ? merged.hubHostSecret : '';
     delete merged.workbuddyEndpoint;
@@ -2920,6 +2921,8 @@ function readSettings() {
     merged.edgeDockWarnColors = parseBoolean(merged.edgeDockWarnColors, false);
     merged.edgeDockMacBackdrop = normalizeEdgeDockBackdropMode(merged.edgeDockMacBackdrop);
     merged.edgeDockWindowsBackdrop = normalizeWindowsDockBackdropMode(merged.edgeDockWindowsBackdrop);
+    merged.edgeDockBubbleSize = normalizeEdgeDockBubbleSize(merged.edgeDockBubbleSize);
+    merged.edgeDockBubbleCustomScale = normalizeEdgeDockCustomScale(merged.edgeDockBubbleCustomScale);
     merged.edgeDockSize = normalizeEdgeDockSize(merged.edgeDockSize);
     merged.edgeDockCustomScale = normalizeEdgeDockCustomScale(merged.edgeDockCustomScale);
     merged.edgeDockItems = normalizeEdgeDockItems(merged.edgeDockItems);
@@ -3332,7 +3335,7 @@ function getLimitsHistoryController() {
     isOwner: win => win === mainWindow || win === dashboardWindow,
     read: limitsHistoryPayload,
     getOpenMode: () => settings.limitsHistoryOpenMode,
-    getMaterialOptions: () => ({ ...nativeMaterialOptions(), radius: 14 })
+    getMaterialOptions: () => ({ ...nativeMaterialOptions(), windowsBackdrop: settings.windowsBackdrop, radius: 14 })
   });
   return limitsHistoryController;
 }
@@ -3565,13 +3568,19 @@ function limitInvalidationKey(scope) {
     || scope?.accountLabel
     || ''
   ).trim();
-  return account ? `${provider}:${account}` : `${provider}:*`;
+  if (account) return `${provider}:${account}`;
+  return provider === 'minimax' && scope?.source === 'api' ? `${provider}:source:api` : `${provider}:*`;
 }
 
 function rememberPendingLimitInvalidation(scope, reason, options = {}) {
   const refresh = options.refresh !== false;
   const normalized = { ...scope, provider: String(scope?.provider || '').trim().toLowerCase() };
   const key = limitInvalidationKey(normalized);
+  const broad = pendingLimitInvalidations.get(`${normalized.provider}:*`);
+  if (normalized.provider === 'minimax' && normalized.source === 'api' && broad?.clear) {
+    broad.refresh ||= refresh;
+    return;
+  }
   let clear = options.clear === true || pendingLimitInvalidations.get(key)?.clear === true;
   if (key.endsWith(':*')) {
     for (const pendingKey of pendingLimitInvalidations.keys()) {
@@ -5481,6 +5490,9 @@ function stopStatsStream() {
 
 async function startStatsStream(options = {}) {
   stopStatsStream();
+  // Legacy History needs reconciliation after reconnect. Negotiated uploads
+  // keep their independent baseline and recover through 409 if the Hub lost it.
+  postSyncPayload.resetHistory({ preserveDelta: !options.resetSnapshot });
   const generation = hubModeGeneration;
   const widgetProducerOwner = captureMacWidgetProducerOwner();
   if (settings?.hubMode !== 'client') return;
@@ -6732,7 +6744,7 @@ function ensureTray() {
           home: true,
           project: settings?.projectsEnabled !== false,
           session: true,
-          limits: settings?.limitsEnabled !== false && parseLimitProviders(settings?.limitProviders).length > 0,
+          limits: settings?.limitsEnabled !== false && migrateLimitProviders(settings?.limitProviders).length > 0,
           trends: settings?.historyEnabled !== false,
           status: true
         }
@@ -8044,25 +8056,26 @@ async function cursorStatusValue({ discover = false } = {}) {
   const managementBlocked = isExternalAgentActive();
   let accounts = cursorAuth.listAccounts();
   if (discover && !managementBlocked) {
-    try {
-      await cursorAuth.runCursorDiscover({
-        dismissedTokenFingerprints: normalizeCursorDismissedTokenFingerprints(settings?.cursorDismissedDesktopTokens)
-      });
-    } catch (_) { /* signed-out or unavailable Cursor app */ }
+    try { await cursorAuth.runCursorDiscover(); } catch (_) { /* signed-out or unavailable Cursor app */ }
     accounts = cursorAuth.listAccounts();
   }
   const disabled = new Set(normalizeCursorDisabledAccountIds(settings?.cursorDisabledAccountIds));
   const manual = new Set(normalizeCursorAccountIds(settings?.cursorManualAccountIds));
-  const safeAccounts = await Promise.all(accounts.map(async (account) => {
+  const desktop = cursorAuth.readCursorDesktopSignIn();
+  const listedAccounts = await Promise.all(accounts.map(async (account) => {
     const probeResult = await cursorProbe.probe(account.sessionToken);
     const expired = !probeResult.ok && probeResult.error?.kind === 'unauthorized';
+    // Desktop-detected accounts follow the desktop sign-in; manual ones stay
+    // until removed. Hidden accounts keep their credentials and usage history.
+    if (!manual.has(account.id) && !isCursorDetectedAccountCurrent({
+      desktop,
+      userId: cursorAuth.canonicalCursorUserId(account.userId || account.id),
+      unauthorized: expired
+    })) return null;
     return {
       id: account.id,
       enabled: !disabled.has(account.id),
-      // Desktop-imported accounts stay ambient while Cursor accepts them; once
-      // Cursor rejects the token they can be removed like a manual account.
-      removable: manual.has(account.id) || expired,
-      detected: !manual.has(account.id),
+      removable: manual.has(account.id),
       email: probeResult.ok ? probeResult.user?.email || '' : '',
       label: account.label || '',
       membershipType: probeResult.ok ? probeResult.usage.membershipType || '' : '',
@@ -8070,6 +8083,7 @@ async function cursorStatusValue({ discover = false } = {}) {
       error: probeResult.ok ? '' : probeResult.error?.message || ''
     };
   }));
+  const safeAccounts = listedAccounts.filter(Boolean);
   return {
     loggedIn: safeAccounts.length > 0,
     accounts: safeAccounts,
@@ -8295,6 +8309,7 @@ app.whenReady().then(() => {
     patch = skinSelection.patch;
     const contentRuntime = getSyncContentRuntime();
     credentialCommands.noteSettingsPatch(patch);
+    minimaxApiKeys.noteSettingsPatch(patch);
     const previousSettingsState = settings;
     const previousRuntimeSettings = JSON.parse(JSON.stringify(settings));
     const previousClients = settings.clients;
@@ -8451,6 +8466,8 @@ app.whenReady().then(() => {
       edgeDockWarnColors: parseBoolean(patch.edgeDockWarnColors ?? settings.edgeDockWarnColors, false),
       edgeDockMacBackdrop: normalizeEdgeDockBackdropMode(patch.edgeDockMacBackdrop ?? settings.edgeDockMacBackdrop),
       edgeDockWindowsBackdrop: normalizeWindowsDockBackdropMode(patch.edgeDockWindowsBackdrop ?? settings.edgeDockWindowsBackdrop),
+      edgeDockBubbleSize: normalizeEdgeDockBubbleSize(patch.edgeDockBubbleSize ?? settings.edgeDockBubbleSize),
+      edgeDockBubbleCustomScale: normalizeEdgeDockCustomScale(patch.edgeDockBubbleCustomScale ?? settings.edgeDockBubbleCustomScale),
       edgeDockSize: normalizeEdgeDockSize(patch.edgeDockSize ?? settings.edgeDockSize),
       edgeDockCustomScale: normalizeEdgeDockCustomScale(patch.edgeDockCustomScale ?? settings.edgeDockCustomScale),
       // `null` is a real value here (back to the automatic default), so the
@@ -8475,7 +8492,7 @@ app.whenReady().then(() => {
           { currencyApi: { normalizeCurrency } }
         )
       },
-      limitProviders: patch.limitProviders !== undefined ? parseLimitProviders(patch.limitProviders).join(',') : settings.limitProviders,
+      limitProviders: patch.limitProviders !== undefined ? migrateLimitProviders(patch.limitProviders) : settings.limitProviders,
       limitProviderOrder: patch.limitProviderOrder !== undefined ? migrateLimitProviderOrder(patch.limitProviderOrder) : settings.limitProviderOrder,
       clientDisplayOrder: patch.clientDisplayOrder !== undefined ? migrateClientDisplayOrder(patch.clientDisplayOrder) : (settings.clientDisplayOrder || ''),
       hiddenClients: patch.hiddenClients !== undefined ? migrateClientSelection(patch.hiddenClients, normalizeHiddenClients) : migrateClientSelection(settings.hiddenClients, normalizeHiddenClients),
@@ -8516,12 +8533,12 @@ app.whenReady().then(() => {
       maskLimitAccountEmails: parseBoolean(patch.maskLimitAccountEmails ?? settings.maskLimitAccountEmails, false),
       limitsHistoryOpenMode: ['hover', 'click', 'off'].includes(patch.limitsHistoryOpenMode ?? settings.limitsHistoryOpenMode) ? (patch.limitsHistoryOpenMode ?? settings.limitsHistoryOpenMode) : 'hover',
       claudePrepaidBalanceEnabled: parseBoolean(patch.claudePrepaidBalanceEnabled ?? settings.claudePrepaidBalanceEnabled, true),
+      claudeCliFallbackEnabled: parseBoolean(patch.claudeCliFallbackEnabled ?? settings.claudeCliFallbackEnabled, true),
       claudeDesktopSplitEnabled: parseBoolean(patch.claudeDesktopSplitEnabled ?? settings.claudeDesktopSplitEnabled, true),
       // Persist explicitly (not only via account persist:spread) so an unrelated
       // settings:update cannot drop the flag, and so limitsConfigFromSettings
       // always sees a boolean rather than an absent key.
       claudeDesktopLocalOnly: parseBoolean(patch.claudeDesktopLocalOnly ?? settings.claudeDesktopLocalOnly, false),
-      claudeCliFallbackEnabled: parseBoolean(patch.claudeCliFallbackEnabled ?? settings.claudeCliFallbackEnabled, true),
       codexResetForecastEnabled: parseBoolean(patch.codexResetForecastEnabled ?? settings.codexResetForecastEnabled, false),
       workbuddyQuotaTotalEnabled: parseBoolean(patch.workbuddyQuotaTotalEnabled ?? settings.workbuddyQuotaTotalEnabled, false),
       showCodexAdditionalLimits: parseBoolean(patch.showCodexAdditionalLimits ?? settings.showCodexAdditionalLimits, true),
@@ -8723,6 +8740,9 @@ app.whenReady().then(() => {
     if (patch && patch.edgeDockCustomScale !== undefined && edgeDockController?.isRunning()) {
       edgeDockController.previewScale(patch.edgeDockCustomScale);
     }
+    if (patch && patch.edgeDockBubbleCustomScale !== undefined && edgeDockController?.isRunning()) {
+      edgeDockController.previewScale(patch.edgeDockBubbleCustomScale, 'bubble');
+    }
     if (patch && patch.notchCustomScale !== undefined && notchController?.isRunning()) {
       notchController.previewScale(patch.notchCustomScale);
     }
@@ -8840,6 +8860,7 @@ app.whenReady().then(() => {
     return true;
   });
   ipcMain.handle('stats:get', async (_event, options) => {
+    if (options?.force === true && options?.feedback === true) void pluginRuntime?.refreshLimits().catch(error => console.log(`[plugins] Limits refresh failed: ${error.message}`));
     const revision = statsPushRevision;
     const fetched = await (options?.force === true && options?.feedback === true ? refreshManualStats() : fetchStats(options));
     // A push from the same source/generation supersedes its pending read. A
@@ -9135,20 +9156,8 @@ app.whenReady().then(() => {
     try {
       const removeId = String(accountId || '').trim();
       const manual = new Set(normalizeCursorAccountIds(settings.cursorManualAccountIds));
-      let dismissedToken = '';
-      if (!removeId) {
-        return { ok: false, error: 'Cursor account not found' };
-      }
-      if (!manual.has(removeId)) {
-        // A desktop-imported account may be removed only after Cursor rejects
-        // its token; a live desktop sign-in is disabled instead.
-        const account = cursorAuth.listAccounts().find((entry) => entry.id === removeId);
-        if (!account) return { ok: false, error: 'Cursor account not found' };
-        const probeResult = await cursorProbe.probe(account.sessionToken);
-        if (probeResult.ok || probeResult.error?.kind !== 'unauthorized') {
-          return { ok: false, error: 'Only manually added or expired Cursor accounts can be removed' };
-        }
-        dismissedToken = cursorAuth.cursorTokenFingerprint(account.sessionToken);
+      if (!removeId || !manual.has(removeId)) {
+        return { ok: false, error: 'Only manually added Cursor accounts can be removed' };
       }
       await cursorAuth.runCursorLogout({ accountId: removeId });
       const disabled = normalizeCursorDisabledAccountIds(settings.cursorDisabledAccountIds)
@@ -9156,12 +9165,6 @@ app.whenReady().then(() => {
       const limitsChanged = disabled.length !== settings.cursorDisabledAccountIds.length;
       settings.cursorDisabledAccountIds = disabled;
       settings.cursorManualAccountIds = [...manual].filter((id) => id !== removeId);
-      if (dismissedToken) {
-        settings.cursorDismissedDesktopTokens = normalizeCursorDismissedTokenFingerprints([
-          ...normalizeCursorDismissedTokenFingerprints(settings.cursorDismissedDesktopTokens),
-          dismissedToken
-        ]);
-      }
       saveSettings({ throwOnError: true });
       if (limitsChanged) {
         deviceRuntimeHandle?.reconfigureLimits(electronLimitsConfig());
@@ -9588,6 +9591,23 @@ app.whenReady().then(() => {
     void queueLimitInvalidation({ provider: 'opencode' }, 'ambient-toggle', { clear: true });
     return { ok: true };
   });
+  const minimaxApiKeys = createMinimaxApiKeys({
+    getSettings: () => settings, saveSettings,
+    probeDeps: () => electronProviderDeps({ env: {}, signal: AbortSignal.timeout(15_000) }),
+    changed: (accountKey, refresh, reason) => {
+      credentialCommands.noteSettingsPatch({ minimaxApiKey: '' });
+      deviceRuntimeHandle?.reconfigureLimits(electronLimitsConfig());
+      void queueLimitInvalidation({ provider: 'minimax', source: 'api', accountKey }, reason, { clear: true, refresh });
+      pushSettingsToRenderer();
+    }
+  });
+  ipcMain.handle('minimax:getKeys', () => minimaxApiKeys.getKeys());
+  for (const method of ['addKey', 'removeKey']) {
+    ipcMain.handle(`minimax:${method}`, async (_event, ...args) => {
+      try { return await minimaxApiKeys[method](...args); }
+      catch (error) { return { ok: false, error: error?.message || 'Could not save MiniMax API key' }; }
+    });
+  }
   ipcMain.handle('openrouter:getProfiles', async () => {
     return {
       profiles: redactOpenRouterProfilesForRenderer(settings.openrouterProfiles || {}),
@@ -10004,6 +10024,7 @@ app.whenReady().then(() => {
   function startPluginRuntime() {
     try {
       pluginRuntime = createPluginRuntime({
+        fetchImpl: electronLimitsFetch(),
         getAppSettings: settingsForRenderer,
         electron: { app, BrowserWindow, utilityProcess: require('electron').utilityProcess, Notification, ipcMain, nativeImage, session, shell, dialog },
         userDataDir: app.getPath('userData'),

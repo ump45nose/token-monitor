@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { customPricingPath } = require('./tokscaleConfig');
+const { catalogRevision, createPricingCatalogRefresher } = require('./pricingCatalog');
 const { senpiWatchSources } = require('./providers/senpi/paths');
 const { abortReason, throwIfAborted } = require('./abortSignal');
 const { readJson, sharedDataDir } = require('./config');
@@ -637,6 +638,7 @@ function runTokscale({
   customScanPaths,
   homeDir,
   qoderCnUsdPerCredit,
+  offlinePricing = false,
   workspaces = true
 }) {
   throwIfAborted(signal);
@@ -656,7 +658,7 @@ function runTokscale({
   const groupBy = () => (workspaces && workspaceGroupBySupported(command.identity)
     ? TOKSCALE_WORKSPACE_GROUP_BY
     : TOKSCALE_SESSION_GROUP_BY);
-  const runArgs = (filter, grouping) => ['--json', '--client', filter, '--group-by', grouping, ...flags];
+  const runArgs = (filter, grouping) => [...(offlinePricing ? ['--offline'] : []), '--json', '--client', filter, '--group-by', grouping, ...flags];
   const subprocessOptions = {
     operation: 'tokscale scan',
     terminationOptions,
@@ -692,14 +694,14 @@ function runTokscale({
   ), signal);
 }
 
-function runTokscaleGraph({ clients, commandTimeoutMs, signal, terminationOptions, onTerminationUnconfirmed, customScanPaths, homeDir, qoderCnUsdPerCredit }) {
+function runTokscaleGraph({ clients, commandTimeoutMs, signal, terminationOptions, onTerminationUnconfirmed, customScanPaths, homeDir, qoderCnUsdPerCredit, offlinePricing = false }) {
   throwIfAborted(signal);
   const command = tokscaleCommand({ customScanPaths, homeDir, qoderCnUsdPerCredit });
   const requested = tokscaleClientFilter(clients);
   if (!requested) return Promise.resolve({ contributions: [] });
   const clientFilter = applyKnownCapabilityFilter(requested, command.identity);
   if (!clientFilter) return Promise.resolve({ contributions: [] });
-  const runArgs = (filter) => ['graph', '--client', filter, '--no-spinner'];
+  const runArgs = (filter) => [...(offlinePricing ? ['--offline'] : []), 'graph', '--client', filter, '--no-spinner'];
   const subprocessOptions = {
     operation: 'tokscale graph',
     terminationOptions,
@@ -720,7 +722,7 @@ function runTokscaleGraph({ clients, commandTimeoutMs, signal, terminationOption
 function lookupModelPricing(modelId, commandTimeoutMs = 15000) {
   const id = String(modelId || '').trim();
   if (!id) return Promise.reject(new Error('lookupModelPricing: modelId is required'));
-  return spawnTokscaleJson(['pricing', id, '--json', '--no-spinner'], commandTimeoutMs);
+  return spawnTokscaleJson(['--offline', 'pricing', id, '--json', '--no-spinner'], commandTimeoutMs);
 }
 
 // The collector's stamp and history.js's window/streak boundary have to be the same
@@ -986,6 +988,7 @@ async function collectUsageOnce(options) {
   const runTokscaleScan = options.runTokscale || ((input) => runTokscale({
     ...input,
     workspaces: projectsEnabled,
+    offlinePricing: options.offlinePricing,
     customScanPaths: options.customScanPaths,
     qoderCnUsdPerCredit: options.qoderCnUsdPerCredit,
     homeDir: options.homeDir,
@@ -1000,6 +1003,7 @@ async function collectUsageOnce(options) {
   };
   const runGraphFn = options.runGraph || ((input) => runTokscaleGraph({
     ...input,
+    offlinePricing: options.offlinePricing,
     customScanPaths: options.customScanPaths,
     qoderCnUsdPerCredit: options.qoderCnUsdPerCredit,
     homeDir: options.homeDir,
@@ -1521,13 +1525,13 @@ function clientWatchCandidates(clientsCsv, options = {}) {
   if (senpiSources) options = { ...options, senpiSources };
   const byClient = {};
   for (const [client, roots] of Object.entries(clientSourceRoots(clientsCsv, options))) {
-    // The Copilot data root already keeps its `otel/` child through the
-    // matcher below. Keep that child as a diagnostic/source check, but do not
-    // hand both nested paths to chokidar or it may install two native watches
-    // over the same tree.
+    // The Copilot data root already keeps its otel and session-state children
+    // through the matcher below. Keep both as diagnostic/source checks, but do not
+    // hand overlapping parent and child paths to chokidar or it may install
+    // duplicate native watches over the same tree.
     byClient[client] = roots
       .filter((root) => (
-        !(client === 'copilot' && root.id === 'copilot-otel')
+        !(client === 'copilot' && ['copilot-otel', 'copilot-session-state'].includes(root.id))
         && !INTERVAL_ONLY_SOURCE_CHECK_IDS.has(root.id)
       ))
       .map((root) => root.dir);
@@ -1669,11 +1673,12 @@ function watchAttributionRootsForClients(clientsCsv, watchRoots = null, options 
   return attributed;
 }
 
-function clientsForWatchPath(filePath, rootsByClient) {
+function clientsForWatchPath(filePath, rootsByClient, ignoreByClient = null) {
   if (!filePath) return [];
   const resolved = path.resolve(filePath);
   const matched = [];
   for (const [client, roots] of Object.entries(rootsByClient || {})) {
+    if (ignoreByClient?.[client]?.(resolved)) continue;
     if (roots.some((root) => {
       const resolvedRoot = path.resolve(root);
       return resolved === resolvedRoot || resolved.startsWith(resolvedRoot + path.sep);
@@ -1948,6 +1953,12 @@ function watchPolicyEntries(clientsCsv, options = {}) {
 
   bound('copilot', withBasename('copilot', '.copilot'), (parts) => {
     if (parts[0] === 'otel') return false;
+    if (parts[0] === 'session-state') {
+      // Native CLI sessions can appear after the watcher starts. Keep their
+      // discovery directories and direct legacy JSONL files, but prune each
+      // session's plans, checkpoints and other non-usage content.
+      return parts.length > 2 && !(parts.length === 3 && parts[2] === 'events.jsonl');
+    }
     if (parts.length === 1) return !COPILOT_DB_WATCH_PATTERN.test(parts[0]);
     return true;
   });
@@ -2008,6 +2019,29 @@ function watchPolicyEntries(clientsCsv, options = {}) {
       return true;
     }
   );
+
+  // Prime's sessionDir may be cwd or the whole home. Its normal root sessions
+  // are direct JSONL files; RLM transcripts are artifacts/<parent>/sub-*/*.jsonl.
+  // Bound live traversal to that layout, while full Tokscale scans remain
+  // recursive. Explicit extra scan roots keep the custom-root policy below.
+  if (candidates['prime-agent']) {
+    const roots = clientSourceRoots('prime-agent', options)['prime-agent'];
+    const isTranscript = (name) => name.endsWith('.jsonl') && name !== 'rlm-subagents.jsonl';
+    bound('prime-agent', roots.filter(({ id }) => id === 'prime-agent-sessions').map(({ dir }) => dir),
+      directChildOnly(isTranscript));
+    bound('prime-agent', roots.filter(({ id }) => id === 'prime-agent-artifacts').map(({ dir }) => dir), (parts, resolved) => {
+      if (pruneDependencyTrees(parts)) return true;
+      if (parts.length === 1) {
+        try { return !fs.statSync(resolved).isDirectory(); } catch (_) {
+          // Removed parents can contain transcripts; keep their removal signal.
+          return false;
+        }
+      }
+      if (!parts[1].startsWith('sub-')) return true;
+      if (parts.length === 2) return false;
+      return parts.length !== 3 || !isTranscript(parts[2]);
+    });
+  }
 
   // Command Code recursively stores session transcripts below projects/, but
   // checkpoint streams use the same JSONL suffix and are explicitly skipped by
@@ -2341,6 +2375,7 @@ function pricingFingerprint(options = {}) {
     env: tokscaleEnvWithBlanksDropped(process.env)
   });
   const hash = createHash('sha256');
+  hash.update(JSON.stringify(catalogRevision({ env: tokscaleEnvWithBlanksDropped(process.env) })));
   hash.update(pricingPath);
   const clients = normalizeClientsCsv(options.clients);
   if (!clients || clients.split(',').includes('qodercn')) {
@@ -2769,6 +2804,7 @@ function startCollector(options) {
   let intervalTimer = null;
   let stopped = false;
   let activityScheduler = null;
+  let pricingRefresher = null;
   let activityWatchReady = false;
   let activityUpdate = null;
   let latestActivitySummary = null;
@@ -3015,6 +3051,7 @@ function startCollector(options) {
       let catpawSourceChangeObserved = false;
       const summary = await collectUsageOnce({
         ...options,
+        offlinePricing: true,
         codexDotsVisible,
         signal: runtimeSignal,
         clients,
@@ -3590,6 +3627,10 @@ function startCollector(options) {
       Object.entries(watchAttributionRootsForClients(clients, watchRoots, watchOptions))
         .map(([client, dirs]) => [client, dirs.map(canonicalWatchPath)])
     );
+    // Another client's policy may keep an event under a broad Prime root.
+    // Attribute it using Prime's own source policy, not the global union.
+    const attributionIgnores = rootsByClient['prime-agent']
+      ? { 'prime-agent': watchIgnoreMatcher('prime-agent', watchOptions) } : null;
     // A subset of the same roots, matched separately so a write to a client's
     // parse-local data cannot pass for a write to its self-sync source.
     const sourceSyncRootsByClient = Object.fromEntries(
@@ -3623,7 +3664,7 @@ function startCollector(options) {
       // the collector cannot re-trigger itself. See
       // SELF_WATCHED_SQLITE_SIDECAR_CLIENTS for the measured per-client evidence.
       if (isSelfWatchSqliteSidecarEvent(filePath, rootsByClient)) return;
-      const eventClients = clientsForWatchPath(filePath, attributionRootsByClient);
+      const eventClients = clientsForWatchPath(filePath, attributionRootsByClient, attributionIgnores);
       const activityClients = activityClientsForPath(filePath, activitySources);
       if (activityClients.length || eventClients.some(isSessionActivityClient)) {
         activityScheduler?.request();
@@ -3796,6 +3837,7 @@ function startCollector(options) {
     stopped = true;
     runtimeAbortController.abort(new Error('collector stopped'));
     codexLocalSource?.stop();
+    pricingRefresher?.stop();
     if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
     if (intervalTimer) { clearTimeout(intervalTimer); intervalTimer = null; }
     activityScheduler?.stop();
@@ -3812,7 +3854,12 @@ function startCollector(options) {
     // test pins that startup ordering because reversing it would microtask-spin.
     if (startBarrier) return Promise.resolve(startBarrier).then(() => whenIdle());
     const usageIdle = !tickInFlight ? Promise.resolve() : new Promise((resolve) => idleWaiters.push(resolve));
-    return usageIdle.then(() => activityUpdate).then(() => stopped ? codexLocalSource?.whenIdle() : undefined);
+    return usageIdle.then(() => activityUpdate).then(async () => {
+      if (stopped) {
+        await pricingRefresher?.whenIdle();
+        await codexLocalSource?.whenIdle();
+      }
+    });
   }
 
   function getDiagnostics() {
@@ -3858,6 +3905,23 @@ function startCollector(options) {
 
   setupWatchers();
   loop();
+  // Injected scans own their pricing in tests/embedders. Production downloads
+  // run independently of usage ticks, never once per model or source event.
+  if (!options.runTokscale || options.refreshPricingCatalog) {
+    pricingRefresher = createPricingCatalogRefresher({
+      env: tokscaleEnvWithBlanksDropped(process.env),
+      refresh: options.refreshPricingCatalog || (() => spawnTokscaleJson(
+        ['pricing', 'refresh', '--json', '--no-spinner'], 120_000,
+        tokscaleCommand(), runtimeSignal, {
+          operation: 'tokscale pricing refresh',
+          terminationOptions: options.subprocessTerminationOptions
+        }
+      )),
+      onUpdate: () => runTick('pricing-change', { forceHistory: true }),
+      onError: error => log(`Pricing refresh failed; retaining cached prices: ${error.message}`)
+    }, options.pricingCatalogTimers);
+    pricingRefresher.start();
+  }
   if (options.sessionActivityPolling !== false && sessionActivityProvidersFor(trackedClients).length) {
     activityScheduler = createSessionActivityScheduler({
       refresh: pollSessionActivity,

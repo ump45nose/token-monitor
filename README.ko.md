@@ -30,7 +30,7 @@
 
 ## Token Monitor란?
 
-Claude Code, Codex, Cursor, GitHub Copilot, Cherry Studio 등 50개 이상의 AI 코딩 도구의 실시간 토큰 사용량과 AI 도구 한도를 보여 주는 데스크톱 앱입니다. 여러 기기 간 실시간 동기화, 사용 추세 기록, 도구·기기·모델·세션·프로젝트별 분류 보기를 지원합니다. 메인 창, MacBook 노치, 메뉴 막대나 시스템 트레이, 화면 가장자리, 플로팅 버블, 네이티브 macOS 위젯 등 시선이 닿는 곳 어디서나 확인할 수 있습니다.
+Claude Code, Codex, Cursor, GitHub Copilot, Cherry Studio 등 53개 이상의 AI 코딩 도구의 실시간 토큰 사용량과 AI 도구 한도를 보여 주는 데스크톱 앱입니다. 여러 기기 간 실시간 동기화, 사용 추세 기록, 도구·기기·모델·세션·프로젝트별 분류 보기를 지원합니다. 메인 창, MacBook 노치, 메뉴 막대나 시스템 트레이, 화면 가장자리, 플로팅 버블, 네이티브 macOS 위젯 등 시선이 닿는 곳 어디서나 확인할 수 있습니다.
 
 ## 지원 도구
 
@@ -76,6 +76,9 @@ Claude Code, Codex, Cursor, GitHub Copilot, Cherry Studio 등 50개 이상의 AI
     <img src=".github/assets/tools-icon/devin.png" width="40" alt="Devin" title="Devin" />
     <img src=".github/assets/tools-icon/fx.png" width="40" alt="fx" title="fx" />
     <img src=".github/assets/tools-icon/minimax.png" width="40" alt="MiniMax" title="MiniMax" />
+    <img src=".github/assets/tools-icon/mistral.png" width="40" alt="Mistral Vibe" title="Mistral Vibe" />
+    <img src=".github/assets/tools-icon/prime-agent.png" width="40" alt="Prime Agent" title="Prime Agent" />
+    <img src=".github/assets/tools-icon/jcode.png" width="40" alt="Jcode" title="Jcode" />
     <img src=".github/assets/tools-icon/typesafe.png" width="40" alt="TypeSafe" title="TypeSafe" />
     <img src=".github/assets/tools-icon/openrouter.png" width="40" alt="OpenRouter" title="OpenRouter" />
     <img src=".github/assets/tools-icon/volcengine.png" width="40" alt="Volcengine" title="Volcengine" />
@@ -85,7 +88,7 @@ Claude Code, Codex, Cursor, GitHub Copilot, Cherry Studio 등 50개 이상의 AI
     <img src=".github/assets/tools-icon/stepfun.png" width="40" alt="StepFun" title="StepFun" />
     <img src=".github/assets/tools-icon/notion.png" width="40" alt="Notion AI" title="Notion AI" />
     <img src=".github/assets/tools-icon/manus.png" width="40" alt="Manus" title="Manus" />
-    <img src=".github/assets/tools-icon/openai.png" width="40" alt="OpenAI" title="OpenAI" />
+    <img src=".github/assets/tools-icon/opendesign.png" width="40" alt="OpenDesign" title="OpenDesign" />
     <img src=".github/assets/tools-icon/thirdparty.gif" width="40" alt="서드파티 API" title="서드파티 API" />
 </p>
 
@@ -156,7 +159,7 @@ brew install --cask token-monitor
 
 ### 사용량 추적
 
-- **실시간 토큰 추적** — Claude Code, Codex, Cursor, GitHub Copilot, Antigravity, OpenCode 등 39개 이상의 AI 도구, 턴당 수 초 내 UI 갱신 (전체 목록은 위 표 참고)
+- **실시간 토큰 추적** — Claude Code, Codex, Cursor, GitHub Copilot, Antigravity, OpenCode 등 42개 이상의 AI 도구, 턴당 수 초 내 UI 갱신 (전체 목록은 위 표 참고)
 - **실시간 토큰 속도** — 생성 속도를 `tok/s`로, 총 소모를 `tok/min`으로 보여주는 선택형 실시간 표시
 - **세션별 상세** — 세션을 열면 프롬프트별 토큰, 응답별 토큰 분할·사용 도구까지 확장 (로컬 transcript/DB를 필요할 때만 읽으며 동기화하지 않음)
 - **캐시 히트 통계** — 도구·모델 클릭 시 입력 토큰(캐시 hit/miss), 출력 토큰, 히트율 상세
@@ -166,7 +169,7 @@ brew install --cask token-monitor
 
 ### 한도·추세·내보내기
 
-- **AI 도구 한도 감지** — Claude Code, Codex, Cursor, OpenRouter, 서드파티 API, GLM, Kimi 등 32개 이상 공급자의 session/daily/weekly/billing/credits, 여러 OpenRouter/서드파티 프로필, 잔액형 계정(Claude 크레딧, DeepSeek 선불 잔액과 사용 내역, 서드파티 잔액)
+- **AI 도구 한도 감지** — Claude Code, Codex, Cursor, OpenRouter, 서드파티 API, GLM, Kimi 등 33개 이상 공급자의 session/daily/weekly/billing/credits, 여러 OpenRouter/서드파티 프로필, 잔액형 계정(Claude 크레딧, DeepSeek 선불 잔액과 사용 내역, 서드파티 잔액)
 - **여러 계정과 Codex 전환** — 한 공급자에서 여러 계정을 추적하고 각각의 한도를 표시. 추적 중인 Codex 계정은 재인증 없이 로컬 계정으로 한 번에 전환 가능
 - **Codex 초기화 예측** — 선택적으로 켜는 서드파티 초기화 예측. 예상 초기화 시각, 초기화 유형(Regular 또는 Banked), 마지막 초기화 시각을 표시
 - **삭제된 세션 사용량 유지** — 많은 도구가 오래된 세션을 정리합니다(Claude Code는 기본적으로 30일 후 트랜스크립트 삭제). 켜면 Token Monitor가 관측한 일별 도구/모델 사용량을 로컬에 보관해, 원본 파일이 사라져도 히트맵과 추세를 유지합니다(아래 [세션 데이터 보존 기간](#세션-데이터-보존-기간) 참고)
@@ -250,6 +253,9 @@ Token Monitor는 **토큰 사용량**, **계정 한도**, **세션 상세**를 �
 | <img src=".github/assets/tools-icon/devin.png" width="28" alt="Devin" /> | Devin CLI / Devin Desktop | `~/.local/share/devin/cli/sessions.db`, `<platform-app-data>/Devin/User/acp-events/` | ✅ | ✅ | — |
 | <img src=".github/assets/tools-icon/fx.png" width="28" alt="fx" /> | fx | `~/.fx/sessions/` | ✅ | — | — |
 | <img src=".github/assets/tools-icon/minimax.png" width="28" alt="MiniMax" /> | MiniMax / MiniMax Code | `~/.minimax/v2/sessions/` | ✅ | ✅ | — |
+| <img src=".github/assets/tools-icon/mistral.png" width="28" alt="Mistral" /> | Mistral Vibe | `$VIBE_HOME/logs/session/` (`~/.vibe/logs/session/`); Mistral Admin 쿠키 (Included API / Vibe 월간 할당량 및 크레딧 잔액) | ✅ | ✅ | — |
+| <img src=".github/assets/tools-icon/prime-agent.png" width="28" alt="Prime Agent" /> | Prime Agent | `~/.prime/agent/` (`sessions/`, `session-artifacts/`) | ✅ | — | — |
+| <img src=".github/assets/tools-icon/jcode.png" width="28" alt="Jcode" /> | Jcode | `~/.jcode/sessions/` | ✅ | — | — |
 | <img src=".github/assets/tools-icon/typesafe.png" width="28" alt="TypeSafe" /> | TypeSafe | TypeSafe Console Cookie (청구 잔액 및 토큰 사용량 기반 예상 지출) | — | ✅ | — |
 | <img src=".github/assets/tools-icon/openrouter.png" width="28" alt="OpenRouter" /> | OpenRouter | OpenRouter API 키 (사용량/키 한도, credits 접근 승인 시 잔액 표시; 공식 문서는 Management 키 지정) | — | ✅ | — |
 | <img src=".github/assets/tools-icon/volcengine.png" width="28" alt="Volcengine" /> | Volcengine | Ark API key 또는 Volcengine AK/SK (Volcengine API로 Ark Coding Plan / Agent Plan 할당량 조회) | — | ✅ | — |
@@ -259,7 +265,7 @@ Token Monitor는 **토큰 사용량**, **계정 한도**, **세션 상세**를 �
 | <img src=".github/assets/tools-icon/stepfun.png" width="28" alt="StepFun" /> | StepFun | StepFun Oasis-Token (Coding Plan / Token Plan 할당량) | — | ✅ | — |
 | <img src=".github/assets/tools-icon/notion.png" width="28" alt="Notion AI" /> | Notion AI | Business/Enterprise용 Notion AI 롤링/월간 허용량; 수동 token_v2 Cookie + 명시적 워크스페이스 ID | — | ✅ | — |
 | <img src=".github/assets/tools-icon/manus.png" width="28" alt="Manus" /> | Manus | Manus 크레딧(월간 + 일일/정기 리프레시 + 잔액); 데스크톱 세션(macOS/Windows) 또는 수동 웹 세션(모든 OS) | — | ✅ | — |
-| <img src=".github/assets/tools-icon/openai.png" width="28" alt="OpenAI" /> | OpenAI | Admin API 키. 갱신일 이후 조직 Costs를 ChatGPT Pro 공개 한도(Pro 5x $100, Pro 20x $200, Pro 50x $500)에서 뺀 API credit 추정치 | — | ✅ | — |
+| <img src=".github/assets/tools-icon/opendesign.png" width="28" alt="OpenDesign" /> | OpenDesign | 현재 워크스페이스의 5시간 / 주간 구독 한도; 수동 Cookie | — | ✅ | — |
 | <img src=".github/assets/tools-icon/thirdparty.gif" width="28" alt="서드파티 API" /> | 서드파티 API | New API / Sub2API 호환 계정 프리셋(호환 One API 포크 포함), New API 키 프리셋, 사용자 지정 잔액 엔드포인트 | — | ✅ | — |
 
 <details>
@@ -277,7 +283,6 @@ Token Monitor는 **토큰 사용량**, **계정 한도**, **세션 상세**를 �
 - Devin은 로컬 `sessions.db`에서 Devin CLI 세션을, `acp-events` ACP 로그에서 Devin Desktop 에이전트 세션을 추적합니다. 같은 세션이 양쪽에 있으면 CLI 데이터베이스가 우선입니다. Desktop 적용 범위는 연결된 ACP 에이전트에 따라 달라집니다. 로컬에 `usage_update` 이벤트를 기록하는 에이전트만 집계되며, Devin Desktop의 기본 `devin-cloud` 에이전트는 서버 측에서 계측되므로 기본 Desktop 구성에서는 Desktop 토큰이 보고되지 않습니다. 세션 제목과 프로젝트 귀속은 CLI 데이터베이스에서 가져옵니다. [Devin 데이터 소스 설명](docs/providers/devin.md)을 참고하세요.
 - Notion AI는 내부 API를 사용합니다. `token_v2` Cookie를 수동으로 붙여넣고 Business/Enterprise 워크스페이스 ID를 명시해야 합니다. 테스트 데이터로만 검증했으며 실제 응답 샘플은 없고 실제 인증 검증은 승인을 기다리고 있습니다. Cookie를 자동으로 가져오지 않으며 공개 API 호환성을 보장하지 않습니다. [Notion 데이터 소스 설명](docs/providers/notion.md)을 참고하세요.
 - Manus는 macOS/Windows 데스크톱 세션을 자동으로 읽으며 Linux를 포함한 모든 OS에서 수동 웹 세션도 지원합니다. 월간 크레딧, 리프레시 한도와 잔액은 같은 비공개 내부 API를 사용하며 호환성을 보장하지 않습니다. [Manus 데이터 소스 설명](docs/providers/manus.md)을 참고하세요.
-- OpenAI는 UTC 갱신일을 기준으로 연결된 ChatGPT Pro API credit을 추정합니다. 기간 전체의 공개 한도(Pro 5x $100, Pro 20x $200, Pro 50x $500)에서 그 기간의 조직 Costs를 뺍니다. 결제 페이지 잔액이 아니며, 첫 지급의 비례 계산도 반영하지 않습니다. [OpenAI 데이터 소스 설명](docs/providers/openai.md)을 참고하세요.
 - MiniMax Code는 CLI가 기록하는 로컬 세션 기록(`~/.minimax` 또는 `MINIMAX_DATA_DIR` / `MAVIS_DATA_DIR`, `~/.mavis`와 `~/.minimax-<profile>` / `~/.mavis-<profile>` 포함)과 `tokscale headless mcode`로 캡처한 실행을 읽습니다. 양쪽에 모두 있는 같은 턴은 한 번만 집계됩니다.
 
 - Command Code transcript에는 실제 토큰 수나 메시지별 모델 정보가 포함되지 않습니다. 토큰 사용량은 transcript 텍스트에서 추정되며, 모델 귀속과 추정 비용에는 각 요청에서 과거에 사용한 모델이 아니라 현재 설정된 모델이 반영될 수 있습니다.
