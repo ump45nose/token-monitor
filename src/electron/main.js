@@ -410,6 +410,7 @@ const { createSyncUploadScheduler, normalizeSyncUploadIntervalMs } = require('./
 const { createLatestWinsReconciler } = require('./latestWinsReconciler');
 const { createIcloudSyncStore } = require('./icloudSync');
 const { createIcloudSyncRuntime } = require('./icloudSyncRuntime');
+const { isCursorDetectedAccountCurrent } = require('../shared/providers/cursor/account');
 const {
   classifySettingsChange,
   diagnosticConfigurationFromSettings,
@@ -481,7 +482,8 @@ const {
   normalizeEdgeDockMode,
   normalizeEdgeDockOffset,
   normalizeEdgeDockSide,
-  normalizeEdgeDockSize
+  normalizeEdgeDockSize,
+  normalizeEdgeDockBubbleSize
 } = require('./edgeDock/geometry');
 const { buildEdgeDockCells } = require('./renderer/edgeDock/presentation');
 const edgeDockPresentationApi = require('./renderer/edgeDock/presentation');
@@ -708,6 +710,8 @@ function defaultSettings() {
     edgeDockMacBackdrop: 'inherit',
     edgeDockWindowsBackdrop: 'inherit',
     edgeDockSize: 'medium',
+    edgeDockBubbleSize: 'inherit',
+    edgeDockBubbleCustomScale: 1,
     edgeDockCustomScale: 1,
     edgeDockSide: 'right',
     edgeDockFloatingX: null,
@@ -2149,11 +2153,11 @@ function migrateLimitProviders(value) {
   // Saved provider selections are user intent. Normalize ids, but do not expand
   // older defaults into today's full provider list because the saved shape is
   // indistinguishable from a deliberate "only these providers" choice.
-  return parseLimitProviders(value).join(',');
+  return require('./plugins/limits').desktopProviderPreference(value, parseLimitProviders);
 }
 
 function migrateLimitProviderOrder(value) {
-  return parseLimitProviders(value).join(',') || defaultLimitProviderOrder();
+  return require('./plugins/limits').desktopProviderPreference(value, parseLimitProviders) || defaultLimitProviderOrder();
 }
 
 function migrateHomeLimitProviderOrder(value) {
@@ -2894,6 +2898,8 @@ function readSettings() {
     merged.edgeDockWarnColors = parseBoolean(merged.edgeDockWarnColors, false);
     merged.edgeDockMacBackdrop = normalizeEdgeDockBackdropMode(merged.edgeDockMacBackdrop);
     merged.edgeDockWindowsBackdrop = normalizeWindowsDockBackdropMode(merged.edgeDockWindowsBackdrop);
+    merged.edgeDockBubbleSize = normalizeEdgeDockBubbleSize(merged.edgeDockBubbleSize);
+    merged.edgeDockBubbleCustomScale = normalizeEdgeDockCustomScale(merged.edgeDockBubbleCustomScale);
     merged.edgeDockSize = normalizeEdgeDockSize(merged.edgeDockSize);
     merged.edgeDockCustomScale = normalizeEdgeDockCustomScale(merged.edgeDockCustomScale);
     merged.edgeDockItems = normalizeEdgeDockItems(merged.edgeDockItems);
@@ -6708,7 +6714,7 @@ function ensureTray() {
           home: true,
           project: settings?.projectsEnabled !== false,
           session: true,
-          limits: settings?.limitsEnabled !== false && parseLimitProviders(settings?.limitProviders).length > 0,
+          limits: settings?.limitsEnabled !== false && migrateLimitProviders(settings?.limitProviders).length > 0,
           trends: settings?.historyEnabled !== false,
           status: true
         }
@@ -8022,8 +8028,17 @@ async function cursorStatusValue({ discover = false } = {}) {
   }
   const disabled = new Set(normalizeCursorDisabledAccountIds(settings?.cursorDisabledAccountIds));
   const manual = new Set(normalizeCursorAccountIds(settings?.cursorManualAccountIds));
-  const safeAccounts = await Promise.all(accounts.map(async (account) => {
+  const desktop = cursorAuth.readCursorDesktopSignIn();
+  const listedAccounts = await Promise.all(accounts.map(async (account) => {
     const probeResult = await cursorProbe.probe(account.sessionToken);
+    const expired = !probeResult.ok && probeResult.error?.kind === 'unauthorized';
+    // Desktop-detected accounts follow the desktop sign-in; manual ones stay
+    // until removed. Hidden accounts keep their credentials and usage history.
+    if (!manual.has(account.id) && !isCursorDetectedAccountCurrent({
+      desktop,
+      userId: cursorAuth.canonicalCursorUserId(account.userId || account.id),
+      unauthorized: expired
+    })) return null;
     return {
       id: account.id,
       enabled: !disabled.has(account.id),
@@ -8031,10 +8046,11 @@ async function cursorStatusValue({ discover = false } = {}) {
       email: probeResult.ok ? probeResult.user?.email || '' : '',
       label: account.label || '',
       membershipType: probeResult.ok ? probeResult.usage.membershipType || '' : '',
-      expired: !probeResult.ok && probeResult.error?.kind === 'unauthorized',
+      expired,
       error: probeResult.ok ? '' : probeResult.error?.message || ''
     };
   }));
+  const safeAccounts = listedAccounts.filter(Boolean);
   return {
     loggedIn: safeAccounts.length > 0,
     accounts: safeAccounts,
@@ -8417,6 +8433,8 @@ app.whenReady().then(() => {
       edgeDockWarnColors: parseBoolean(patch.edgeDockWarnColors ?? settings.edgeDockWarnColors, false),
       edgeDockMacBackdrop: normalizeEdgeDockBackdropMode(patch.edgeDockMacBackdrop ?? settings.edgeDockMacBackdrop),
       edgeDockWindowsBackdrop: normalizeWindowsDockBackdropMode(patch.edgeDockWindowsBackdrop ?? settings.edgeDockWindowsBackdrop),
+      edgeDockBubbleSize: normalizeEdgeDockBubbleSize(patch.edgeDockBubbleSize ?? settings.edgeDockBubbleSize),
+      edgeDockBubbleCustomScale: normalizeEdgeDockCustomScale(patch.edgeDockBubbleCustomScale ?? settings.edgeDockBubbleCustomScale),
       edgeDockSize: normalizeEdgeDockSize(patch.edgeDockSize ?? settings.edgeDockSize),
       edgeDockCustomScale: normalizeEdgeDockCustomScale(patch.edgeDockCustomScale ?? settings.edgeDockCustomScale),
       // `null` is a real value here (back to the automatic default), so the
@@ -8441,7 +8459,7 @@ app.whenReady().then(() => {
           { currencyApi: { normalizeCurrency } }
         )
       },
-      limitProviders: patch.limitProviders !== undefined ? parseLimitProviders(patch.limitProviders).join(',') : settings.limitProviders,
+      limitProviders: patch.limitProviders !== undefined ? migrateLimitProviders(patch.limitProviders) : settings.limitProviders,
       limitProviderOrder: patch.limitProviderOrder !== undefined ? migrateLimitProviderOrder(patch.limitProviderOrder) : settings.limitProviderOrder,
       clientDisplayOrder: patch.clientDisplayOrder !== undefined ? migrateClientDisplayOrder(patch.clientDisplayOrder) : (settings.clientDisplayOrder || ''),
       hiddenClients: patch.hiddenClients !== undefined ? migrateClientSelection(patch.hiddenClients, normalizeHiddenClients) : migrateClientSelection(settings.hiddenClients, normalizeHiddenClients),
@@ -8688,6 +8706,9 @@ app.whenReady().then(() => {
     if (patch && patch.edgeDockCustomScale !== undefined && edgeDockController?.isRunning()) {
       edgeDockController.previewScale(patch.edgeDockCustomScale);
     }
+    if (patch && patch.edgeDockBubbleCustomScale !== undefined && edgeDockController?.isRunning()) {
+      edgeDockController.previewScale(patch.edgeDockBubbleCustomScale, 'bubble');
+    }
     if (patch && patch.notchCustomScale !== undefined && notchController?.isRunning()) {
       notchController.previewScale(patch.notchCustomScale);
     }
@@ -8805,6 +8826,7 @@ app.whenReady().then(() => {
     return true;
   });
   ipcMain.handle('stats:get', async (_event, options) => {
+    if (options?.force === true && options?.feedback === true) void pluginRuntime?.refreshLimits().catch(error => console.log(`[plugins] Limits refresh failed: ${error.message}`));
     const revision = statsPushRevision;
     const fetched = await (options?.force === true && options?.feedback === true ? refreshManualStats() : fetchStats(options));
     // A push from the same source/generation supersedes its pending read. A
@@ -9968,6 +9990,7 @@ app.whenReady().then(() => {
   function startPluginRuntime() {
     try {
       pluginRuntime = createPluginRuntime({
+        fetchImpl: electronLimitsFetch(),
         getAppSettings: settingsForRenderer,
         electron: { app, BrowserWindow, utilityProcess: require('electron').utilityProcess, Notification, ipcMain, nativeImage, session, shell, dialog },
         userDataDir: app.getPath('userData'),
