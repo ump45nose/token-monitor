@@ -2,7 +2,11 @@
 
 const semver = require('semver');
 
-const GITHUB_REPO = 'Javis603/token-monitor';
+const DEFAULT_GITHUB_REPO = 'Javis603/token-monitor';
+// The release feed follows electron-builder's build.publish entry, the same
+// source electron-updater's app-update.yml is generated from, so a fork that
+// publishes its own builds checks its own releases instead of upstream's.
+const GITHUB_REPO = releaseRepoFromPackage();
 const RELEASES_URL = `https://github.com/${GITHUB_REPO}/releases`;
 const RELEASES_LATEST_URL = `${RELEASES_URL}/latest`;
 const REQUEST_TIMEOUT_MS = 10 * 1000;
@@ -44,6 +48,21 @@ const RELEASE_NOTE_HTML_TAGS = new Set([
   'tr', 'u', 'ul', 'var'
 ]);
 const RELEASE_NOTE_VOID_HTML_TAGS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
+
+function releaseRepoFromPackage(packageJson) {
+  let pkg = packageJson;
+  if (pkg === undefined) {
+    try { pkg = require('../../package.json'); }
+    catch (_) { return DEFAULT_GITHUB_REPO; }
+  }
+  const publish = pkg?.build?.publish;
+  const entry = Array.isArray(publish) ? publish[0] : publish;
+  const name = /^[A-Za-z0-9._-]+$/;
+  if (entry?.provider === 'github' && name.test(entry.owner || '') && name.test(entry.repo || '')) {
+    return `${entry.owner}/${entry.repo}`;
+  }
+  return DEFAULT_GITHUB_REPO;
+}
 
 function appUpdateInstallSupport({
   isPackaged = false,
@@ -724,6 +743,8 @@ module.exports = {
   RELEASES_URL,
   RELEASES_LATEST_URL,
   GITHUB_REPO,
+  DEFAULT_GITHUB_REPO,
+  releaseRepoFromPackage,
   APP_UPDATE_BACKGROUND_COOLDOWN_MS,
   APP_UPDATE_OUTDATED_COOLDOWN_MS,
   APP_UPDATE_STARTUP_DELAY_MS
