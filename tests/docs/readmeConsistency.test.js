@@ -60,6 +60,7 @@ const supportedToolOrder = [
   'OpenClaw',
   'Cursor IDE / Cursor CLI / Grok Bot',
   'Antigravity',
+  'Gemini CLI',
   'Cline',
   'Amp',
   'Factory Droid',
@@ -103,6 +104,7 @@ const supportedToolOrder = [
   'StepFun',
   'Notion AI',
   'Manus',
+  'Hark',
   'OpenDesign',
   'Third-party APIs'
 ];
@@ -116,6 +118,7 @@ const supportedToolIdOrder = [
   'openclaw',
   'cursor',
   'antigravity',
+  'gemini-cli',
   'cline',
   'amp',
   'droid',
@@ -159,6 +162,7 @@ const supportedToolIdOrder = [
   'stepfun',
   'notion',
   'manus',
+  'hark',
   'opendesign',
   'thirdparty'
 ];
