@@ -19,6 +19,7 @@
   const sessionContextForRow = sessionLive.sessionContextForRow;
   const isGrokBotSession = sessionLive.isGrokBotSession;
   const fallbackColors = ['#6ab4f0', '#cc7c5e', '#a57df0', '#49a3b0', '#f0d66a', '#f06a7b'];
+  const sessionSearchHaystackCache = new WeakMap();
 
   function setSessionTooltip(node, context, promptCache, translate, view) {
     const entries = [];
@@ -47,13 +48,51 @@
     return text;
   }
 
+  // Search covers the labels a row prints, including every folded subagent's
+  // title and identity, so a child session stays findable under its parent.
+  function sessionSearchHaystack(row) {
+    const cacheable = row !== null && typeof row === 'object';
+    if (cacheable) {
+      const cached = sessionSearchHaystackCache.get(row);
+      if (cached !== undefined) return cached;
+    }
+    const fields = ['name', 'title', 'detail', 'subtitle', 'subtitleIdentity', 'activity',
+      'activitySummary', 'client', 'clientLabel', 'modelLabel', 'groupDetail', 'subagentLabel',
+      'archivedLabel'];
+    const members = Array.isArray(row?.groupRows) && row.groupRows.length > 0 ? row.groupRows : [row];
+    const values = [];
+    for (const member of members) {
+      for (const field of fields) {
+        const value = textValue(member?.[field]);
+        if (value) values.push(value);
+      }
+    }
+    for (const field of fields) {
+      const value = textValue(row?.[field]);
+      if (value) values.push(value);
+    }
+    const haystack = values.join('\n').toLocaleLowerCase();
+    if (cacheable) sessionSearchHaystackCache.set(row, haystack);
+    return haystack;
+  }
+
+  function filterSessionRows(rows, query) {
+    const list = Array.isArray(rows) ? rows : [];
+    const terms = textValue(query).toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    if (terms.length === 0) return list;
+    return list.filter((row) => {
+      const haystack = sessionSearchHaystack(row);
+      return terms.every((term) => haystack.includes(term));
+    });
+  }
+
   // Shared by full session rows and compact Home/Dock/Notch rows. Settings
   // remain visible after live metrics expire, including archived sessions.
   function sessionModelMetadataNode(document, row, { translate, view, ...options }) {
     const node = document.createElement('span');
     node.className = 'session-model-metadata';
     const modelLabel = row?.modelLabel ?? sessionModelLabel(row);
-    const entries = row?.modelTooltipEntries ?? sessionModelTooltipEntries(row, options);
+    const entries = row?.modelTooltipEntries ?? sessionModelTooltipEntries(row, { latestModelLabel: translate('session.latestModel'), ...options });
     if (modelLabel) {
       const model = document.createElement('span');
       model.className = 'session-models';
@@ -191,12 +230,17 @@
       .filter(([, value]) => finiteNumber(value) > 0)
       .map(([model]) => model))]
       .sort();
+    const latest = textValue((session?.groupRows?.[0] || session)?.latestModel);
+    if (latest) {
+      const others = models.filter(model => model !== latest).length;
+      return `${latest}${others ? ` +${others}` : ''}`;
+    }
     if (models.length === 0) return '';
     if (models.length === 1) return models[0];
     return `${models.length} models`;
   }
 
-  // The rows a "N models" label opens on hover: every model behind the count,
+  // The rows a session model label opens on hover: every model behind the count,
   // heaviest first, with its tokens and share of the session. A session can
   // hold tokens no model claimed (a log written before the model field
   // existed, say), so the remainder is reported as one last row rather than
@@ -209,7 +253,9 @@
     const costOnlyModels = Object.entries(session?.modelCosts || {})
       .filter(([model, cost]) => model && finiteNumber(cost) > 0 && !measuredModels.has(model))
       .map(([model]) => model).sort();
-    if (entries.length + costOnlyModels.length < 2) return [];
+    const latest = textValue((session?.groupRows?.[0] || session)?.latestModel);
+    const hasDistinctLatest = Boolean(latest) && !entries.every(entry => entry.model === latest);
+    if (entries.length + costOnlyModels.length < 2 && !hasDistinctLatest) return [];
     entries.sort((a, b) => b.tokens - a.tokens || a.model.localeCompare(b.model));
     const total = finiteNumber(session?.totalTokens);
     const attributed = entries.reduce((sum, entry) => sum + entry.tokens, 0);
@@ -226,6 +272,9 @@
       formatTokens(entry.tokens),
       percentLabel(denominator > 0 ? entry.tokens / denominator * 100 : 0)
     ]);
+    if (latest) {
+      rows.unshift({ full: `${textValue(options.latestModelLabel) || 'Last used'}: ${latest}` });
+    }
     const unlabeled = attributed - named.reduce((sum, entry) => sum + entry.tokens, 0);
     const unattributed = unlabeled + Math.max(0, total - attributed);
     if (unattributed > 0) {
@@ -499,7 +548,7 @@
       name: titleParts.join(' · '),
       modelLabel,
       modelTooltipEntries: sessionModelTooltipEntries(session, {
-        unattributedLabel: options.unattributedLabel
+        unattributedLabel: options.unattributedLabel, latestModelLabel: options.latestModelLabel
       }),
       subtitle: subtitleParts.join(' · '),
       activitySummary: subtitleParts.join(' · '),
@@ -511,6 +560,7 @@
       // window so the reading survives the turn ending, and the dock's card
       // calls the same function so the two cannot disagree.
       context: sessionContextForRow(session, now),
+      latestModel: session.latestModel,
       reasoningEffort: session.reasoningEffort,
       detail: sessionIdLabel(session?.sessionId || key),
       value,
@@ -562,6 +612,7 @@
         if (sessionLive.isArchivedSession(session) && native?.client === session.client
           && native.sessionId === session.sessionId && ['running', 'waiting'].includes(sessionActivityState(native, now))) {
           session = { ...session, archived: false, deleted: false, sourceDeleted: false,
+            latestModel: native.latestModel ?? null,
             lastUsedAt: native.lastUsedAt, liveActivity: native.liveActivity,
             turnEnded: native.turnEnded, waitingForInput: native.waitingForInput,
             ...(sessionLive.isSessionReasoningEffortClient(session.client) ? { reasoningEffort: native.reasoningEffort ?? null } : {}) };
@@ -599,7 +650,7 @@
           name: sessionTitle || titleParts.join(' · '),
           modelLabel,
           modelTooltipEntries: sessionModelTooltipEntries(session, {
-            unattributedLabel: options.unattributedLabel
+            unattributedLabel: options.unattributedLabel, latestModelLabel: options.latestModelLabel
           }),
           subtitle: (sessionTitle ? titleParts : activityParts).join(' · '),
           activity: sessionTitle ? activityParts.join(' · ') : undefined,
@@ -619,6 +670,7 @@
           running: running || undefined,
           activityState,
           context: sessionContextForRow(session, now),
+          latestModel: session.latestModel,
           reasoningEffort: session.reasoningEffort,
           contextSnapshot: !archived ? sessionLive.sessionContextRow(session) : undefined,
           promptCache: sessionLive.sessionPromptCacheForRow(session, now),
@@ -774,7 +826,7 @@
         modelCosts[model] = (modelCosts[model] || 0) + finiteNumber(cost);
       }
     }
-    const group = { client: parent.client, models, modelCosts, totalTokens: value };
+    const group = { client: parent.client, models, modelCosts, totalTokens: value, latestModel: main[0].latestModel };
     const modelLabel = sessionModelLabel(group);
     const display = main[0];
     const titleParts = [display.clientLabel || display.client, modelLabel, sessionReasoningEffortForRow(display)].filter(Boolean).join(' · ');
@@ -813,7 +865,7 @@
       name: display.titled ? display.name : titleParts,
       modelLabel,
       modelTooltipEntries: options.includeModelTooltip === false ? []
-        : sessionModelTooltipEntries(group, { unattributedLabel: options.unattributedLabel }),
+        : sessionModelTooltipEntries(group, { unattributedLabel: options.unattributedLabel, latestModelLabel: options.latestModelLabel }),
       modelTokens: models,
       modelCosts,
       // Keep the tool/model reading order; the renderer reserves space for the
@@ -924,6 +976,7 @@
     applyBreakdownRowSemantics,
     archivedSessionCount,
     compactSessionTime,
+    filterSessionRows,
     groupBackgroundReviewRows,
     groupSessionRows,
     groupSubagentRows,
