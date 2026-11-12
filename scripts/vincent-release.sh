@@ -145,10 +145,12 @@ cmd_build() {
 
   report "## Branches"
   local x
-  for x in "${merged[@]}"; do report "- merged \`$x\`"; done
-  for x in "${skipped[@]}"; do report "- already in $TAG, skipped: \`$x\`"; done
-  for x in "${missing[@]}"; do report "- **missing on the fork**: \`$x\`"; done
-  for x in "${conflicts[@]}"; do report "- **conflict**: \`$x\`"; done
+  # macOS ships bash 3.2, where "${arr[@]}" is an unbound-variable error for an
+  # empty array under `set -u`; the +"..." form is empty-safe on 3.2 and 5.
+  for x in ${merged[@]+"${merged[@]}"}; do report "- merged \`$x\`"; done
+  for x in ${skipped[@]+"${skipped[@]}"}; do report "- already in $TAG, skipped: \`$x\`"; done
+  for x in ${missing[@]+"${missing[@]}"}; do report "- **missing on the fork**: \`$x\`"; done
+  for x in ${conflicts[@]+"${conflicts[@]}"}; do report "- **conflict**: \`$x\`"; done
   report ""
   if ((${#conflicts[@]})); then
     report "Resolve each conflict on a fork branch (merge $TAG into it, or add a vincent/* resolution branch to vincent/branches.txt), then rerun."
