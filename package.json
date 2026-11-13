@@ -1,7 +1,7 @@
 {
   "name": "token-monitor",
   "productName": "Token Monitor",
-  "version": "0.91.1002",
+  "version": "0.92.1001",
   "description": "Live token & cost widget for Claude Code, Codex & Hermes — local-first, optional multi-device sync.",
   "main": "src/electron/launch.js",
   "scripts": {
@@ -35,7 +35,7 @@
     "benchmark:hub-bandwidth": "node scripts/benchmark-hub-bandwidth.js",
     "lint": "eslint .",
     "verify": "npm run lint && npm test",
-    "verify:plugins": "electron scripts/test-plugin-trusted.cjs && electron scripts/test-plugin-trusted-runtime.cjs && electron scripts/test-plugin-trusted-app.cjs && electron scripts/test-plugin-trusted-surfaces.cjs"
+    "verify:plugins": "electron scripts/test-plugin-icons.cjs && electron scripts/test-plugin-trusted.cjs && electron scripts/test-plugin-trusted-runtime.cjs && electron scripts/test-plugin-trusted-app.cjs && electron scripts/test-plugin-trusted-surfaces.cjs"
   },
   "build": {
     "beforePack": "scripts/build-windows-dock.js",
