@@ -29,7 +29,7 @@
 //                                      read, for the plan cell's hover card
 //   format*, limitFillPercent, …       the page's own number formatting
 //   tooltip                            { hasOpened(), markOpened(), release() },
-//                                      the host's render-hold bookkeeping
+//                                      the host's tooltip entrance bookkeeping
 //
 // The one exception to "everything arrives through deps" is the provider
 // catalog: which client a provider's tokens are recorded under is the same
@@ -39,11 +39,14 @@
   const node = typeof module === 'object' && module.exports;
   const api = factory(
     node ? require('../../../shared/limits/providers') : root?.TokenMonitorLimitProviders,
-    node ? require('../../../shared/limits/usageItems') : root?.TokenMonitorLimitUsageItems
+    node ? require('../../../shared/limits/usageItems') : root?.TokenMonitorLimitUsageItems,
+    node ? require('../../../shared/limits/accountScope') : root?.TokenMonitorLimitAccountScope,
+    node ? require('../pressActivation') : root?.TokenMonitorPressActivation,
+    node ? require('../domReconcile') : root?.TokenMonitorDomReconcile
   );
   if (node) module.exports = api;
   if (root) root.TokenMonitorLimitWindowsView = api;
-})(typeof window !== 'undefined' ? window : globalThis, function createLimitWindowsViewApi(limitProviders, usageItems) {
+})(typeof window !== 'undefined' ? window : globalThis, function createLimitWindowsViewApi(limitProviders, usageItems, accountScope, pressActivation, domApi) {
   function createLimitWindowsView(deps) {
     const {
       t,
@@ -101,7 +104,12 @@
       // `{ enabled, busy, forecast }` — the Codex reset forecast as this host
       // currently holds it, read at paint time because the widget refreshes it
       // on its own timer.
-      resetForecast = () => ({ busy: false, forecast: null })
+      resetForecast = () => ({ busy: false, forecast: null }),
+      // `{ available(provider), probes(), refresh(provider) }` — a host that can
+      // refresh limits puts a button on each row's "Updated" line. `probes()` is
+      // the limits runtime's probes in flight, so a refresh the user did not
+      // start spins the row too. A surface without one draws no button.
+      accountRefresh = null
     } = deps;
     const document = deps.document || globalThis.document;
 
@@ -445,6 +453,7 @@
   }
 
   function attachLimitDetailTooltip(wrap, tooltip) {
+    wrap.setAttribute('data-dom-kind', 'detail-tooltip');
     // A popover has no positioned ancestor to lay out against, so it is anchored
     // to its own trigger. Anchor names are per-element and the panel draws many
     // of these, so each pair gets its own rather than a name declared in CSS.
@@ -553,6 +562,7 @@
       tooltip?.hidePopover?.();
       tooltip?.replaceChildren();
       wrap.classList.remove('limit-detail-tooltip-wrap');
+      wrap.removeAttribute('data-dom-kind');
       wrap.removeAttribute('tabindex');
       wrap.removeAttribute('aria-label');
       wrap.style.removeProperty('-webkit-app-region');
@@ -629,13 +639,15 @@
     const preferredSummary = entries.filter(([label]) => label === 'Today' || label === 'Month');
     const summaryEntries = preferredSummary.length > 0 ? preferredSummary : entries.slice(0, 2);
     const formatted = entries.map(([entryLabel, value]) => [entryLabel, formatBalanceSpendAmount(value, balance)]);
+    if (balance?.searchSpend > 0) formatted.push(['Search', formatBalanceSpendAmount(balance.searchSpend, balance)]);
+    if (balance?.fetchSpend > 0) formatted.push(['Fetch', formatBalanceSpendAmount(balance.fetchSpend, balance)]);
     return tagUsageItem(limitNoteRowNode({
       label: 'Spend',
       summary: summaryEntries
         .map(([label, value]) => `${label} ${formatBalanceSpendAmount(value, balance)}`)
         .join(' · '),
       // Only worth a tooltip when it would say more than the summary already does.
-      detailEntries: entries.length > summaryEntries.length ? formatted : null,
+      detailEntries: formatted.length > summaryEntries.length ? formatted : null,
       ariaParts: formatted.map(([entryLabel, value]) => `${entryLabel} ${value}`)
     }), 'spend', 'Spend');
   }
@@ -2064,6 +2076,167 @@
     return mark;
   }
 
+  // Rows whose own button is waiting on the host, keyed like the rows' motion
+  // keys so the spinner survives the list's periodic repaint.
+  const pendingAccountRefreshes = new Set();
+  // Each drawn button's row and status line, so a probe starting or finishing
+  // can update them in place instead of waiting for the list's next repaint.
+  const refreshButtonStatus = new WeakMap();
+
+  function limitRowRefreshing(provider) {
+    if (pendingAccountRefreshes.has(motion.providerKey(provider))) return true;
+    return (accountRefresh.probes() || []).some((probe) => accountScope.probeCoversRow(probe, provider));
+  }
+
+  // Most probes answer in a few hundred milliseconds, so following them
+  // exactly flashes a spinner the eye cannot read, and a background poll
+  // blinks rows the user never touched. The usual spin-delay remedy: a
+  // background refresh shows only once it has outlasted SPIN_DELAY_MS, and a
+  // spinner once shown — at once, for a click — stays at least SPIN_MIN_MS.
+  const SPIN_DELAY_MS = 400;
+  const SPIN_MIN_MS = 800;
+  // How long a click that brought nothing back says so before the row
+  // returns to its plain "Updated" line.
+  const FAILURE_HOLD_MS = 4000;
+  // Per row key: when its refresh began and when its spinner appeared.
+  const spinStates = new Map();
+  // Per row key: why the user's last refresh brought nothing back, and until when to say so.
+  const refreshFailures = new Map();
+  let syncTimer = null;
+  let syncTimerAt = Infinity;
+
+  function scheduleButtonSync(at) {
+    if (at >= syncTimerAt) return;
+    if (syncTimer !== null) clearTimeout(syncTimer);
+    syncTimerAt = at;
+    syncTimer = setTimeout(() => {
+      syncTimer = null;
+      syncTimerAt = Infinity;
+      syncLimitRefreshButtons();
+    }, Math.max(0, at - Date.now()));
+  }
+
+  function limitRowSpinning(key, provider, now) {
+    let spin = spinStates.get(key);
+    if (limitRowRefreshing(provider)) {
+      if (!spin) spinStates.set(key, spin = { since: now, shownAt: null });
+      if (spin.shownAt === null && pendingAccountRefreshes.has(key)) spin.shownAt = now;
+      if (spin.shownAt === null) {
+        if (now - spin.since >= SPIN_DELAY_MS) spin.shownAt = now;
+        else scheduleButtonSync(spin.since + SPIN_DELAY_MS);
+      }
+      return spin.shownAt !== null;
+    }
+    if (spin?.shownAt != null && now - spin.shownAt < SPIN_MIN_MS) {
+      scheduleButtonSync(spin.shownAt + SPIN_MIN_MS);
+      return true;
+    }
+    spinStates.delete(key);
+    return false;
+  }
+
+  // Called only once the row's spinner has cleared, so the hold is counted
+  // from the moment the reason first shows, not from when the request settled
+  // under a spinner still serving its minimum. A failure not shown well past
+  // that minimum (a hold's length of slack for late timers) is stale: its row
+  // was replaced unseen (the dock swaps cards), or a newer probe kept it
+  // spinning and now answers for it.
+  function limitRowFailure(key, now) {
+    const failure = refreshFailures.get(key);
+    if (!failure) return null;
+    if (failure.until === null) {
+      if (now - failure.settledAt > SPIN_MIN_MS + FAILURE_HOLD_MS) {
+        refreshFailures.delete(key);
+        return null;
+      }
+      failure.until = now + FAILURE_HOLD_MS;
+    }
+    if (now >= failure.until) {
+      refreshFailures.delete(key);
+      return null;
+    }
+    scheduleButtonSync(failure.until);
+    return failure;
+  }
+
+  const FAILURE_KEYS = {
+    cooldown: 'limits.refreshAccountCooldown',
+    failed: 'limits.refreshAccountFailed',
+    unavailable: 'limits.refreshAccountFailed'
+  };
+
+  function syncLimitRefreshButton(button) {
+    const provider = domApi.data(button);
+    if (!provider) return;
+    const key = motion.providerKey(provider);
+    const now = Date.now();
+    const busy = limitRowSpinning(key, provider, now);
+    // A spinner is newer news than a failure, so it wins while it shows.
+    const failure = busy ? null : limitRowFailure(key, now);
+    button.classList.toggle('is-refreshing', busy);
+    button.classList.toggle('is-refresh-error', Boolean(failure));
+    button.classList.toggle('is-refresh-cooldown', failure?.reason === 'cooldown');
+    // Not `disabled`: that would drop keyboard focus out from under the user.
+    button.setAttribute('aria-disabled', String(busy));
+    const status = refreshButtonStatus.get(button);
+    if (status) {
+      const text = failure ? t(FAILURE_KEYS[failure.reason] || FAILURE_KEYS.failed) : '';
+      if (status.textContent !== text) status.textContent = text;
+    }
+  }
+
+  // Read current buttons from the DOM, without retaining retired views.
+  function syncLimitRefreshButtons(root = document) {
+    for (const button of root.querySelectorAll('.limit-refresh-button')) syncLimitRefreshButton(button);
+  }
+
+  // The button and the status line that reports a click that came back empty.
+  // The status line is a polite live region from the moment it is drawn, so a
+  // screen reader hears the failure the sighted user sees.
+  function limitRefreshControl(provider, name) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'limit-refresh-button';
+    // Named after the row it sits on, so a group's buttons can be told apart.
+    button.setAttribute('aria-label', t('limits.refreshAccount', { name }));
+    const icon = document.createElement('span');
+    icon.className = 'limit-refresh-icon';
+    icon.setAttribute('aria-hidden', 'true');
+    button.append(icon);
+    const status = document.createElement('span');
+    status.className = 'limit-refresh-status';
+    status.setAttribute('role', 'status');
+    domApi.data(button, provider);
+    refreshButtonStatus.set(button, status);
+    syncLimitRefreshButton(button);
+    // The row's own click handler ignores clicks on buttons.
+    pressActivation.activateOnPress(button, () => {
+      const provider = domApi.data(button);
+      const key = motion.providerKey(provider);
+      // The spinner is the row's state, not the request's: a click while it
+      // still shows (a refresh in flight, or one just settled) does nothing.
+      if (pendingAccountRefreshes.has(key) || button.classList.contains('is-refreshing')) return;
+      refreshFailures.delete(key);
+      pendingAccountRefreshes.add(key);
+      syncLimitRefreshButton(button);
+      void Promise.resolve()
+        .then(() => accountRefresh.refresh(provider))
+        .then((result) => result, () => ({ ok: false, reason: 'failed' }))
+        .then((result) => {
+          if (result?.ok === false) {
+            refreshFailures.set(key, { reason: result.reason || 'failed', settledAt: Date.now(), until: null });
+          }
+        })
+        .finally(() => {
+          pendingAccountRefreshes.delete(key);
+          // The row may have been repainted meanwhile; settle whichever button
+          // stands for it now.
+          syncLimitRefreshButtons();
+        });
+    });
+    return [button, status];
+  }
+
   function renderLimitProviderHead(id, label, provider, color, options = {}) {
     const head = document.createElement('div');
     head.className = 'limit-head';
@@ -2117,7 +2290,17 @@
       // group, where it's each subrow's title (options.accountTitle) — not here.
       if (provider.status === 'ok' || provider.stale) metaParts.push(limitProviderMeta(provider, provenance));
       const metaText = metaParts.filter(Boolean).join(' · ');
-      if (metaText) meta.append(document.createTextNode(metaText));
+      // A reading synced from another device can only be refreshed there.
+      const refreshControl = metaText && accountRefresh?.available(provider) && !provenance.selectedIsRemote
+        ? limitRefreshControl(provider, titleText || limitProviders.LIMIT_PROVIDER_LABELS?.[provider.provider] || provider.provider)
+        : null;
+      if (refreshControl) {
+        const text = document.createElement('span');
+        text.className = 'limit-meta-text';
+        text.textContent = metaText;
+        meta.classList.add('has-refresh');
+        meta.append(text, ...refreshControl);
+      } else if (metaText) meta.append(document.createTextNode(metaText));
       titleBlock.append(meta);
     }
     const plan = document.createElement('div');
@@ -2394,12 +2577,14 @@
         else hoverTimer = setTimeout(() => openHistory(false), 160);
       });
       if (id === 'mimo') {
-        const detail = row.querySelector('[data-usage-item="credits"] .limit-detail-tooltip-wrap');
-        detail?.addEventListener('pointerenter', () => clearTimeout(hoverTimer));
-        detail?.addEventListener('pointerleave', () => {
-          if (settings()?.limitsHistoryOpenMode !== 'click' && row.matches(':hover')) {
-            hoverTimer = setTimeout(() => openHistory(false), 160);
-          }
+        // Delegate to the retained row: a balance disclosure can appear later.
+        row.addEventListener('pointerover', event => {
+          if (event.target.closest('[data-usage-item="credits"] .limit-detail-tooltip-wrap')) clearTimeout(hoverTimer);
+        });
+        row.addEventListener('pointerout', event => {
+          const detail = event.target.closest('[data-usage-item="credits"] .limit-detail-tooltip-wrap');
+          if (!detail || detail.contains(event.relatedTarget)) return;
+          if (settings()?.limitsHistoryOpenMode !== 'click' && row.matches(':hover')) hoverTimer = setTimeout(() => openHistory(false), 160);
         });
       }
       row.addEventListener('pointerleave', () => { clearTimeout(hoverTimer); deps.history.leave(key); });
@@ -3272,6 +3457,7 @@
     renderLimitProviderMark,
     renderLimitProviderRow,
     renderLimitProviderSolo,
+    syncLimitRefreshButtons,
     claudeBalanceNode,
     codexAdditionalWindowLabel,
     codexResetCreditsNode,

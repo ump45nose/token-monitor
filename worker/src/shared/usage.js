@@ -1611,7 +1611,7 @@ function preserveUntrackedClientUsage(existingRecord, incomingRecord, trackedCli
 function limitProviderMergeKey(provider) {
   const name = String(provider?.provider || '').trim();
   if (!name) return '';
-  if (GUI_SECRET_LIMIT_PROVIDERS.has(name)) return name;
+  if (GUI_SECRET_LIMIT_PROVIDERS.has(name) && name !== 'copilot') return name;
   const accountKey = String(provider?.accountKey || '').trim();
   if (accountKey) return `${name}:${accountKey}`;
   const accountEmail = String(provider?.accountEmail || '').trim().toLowerCase();
@@ -1630,6 +1630,12 @@ function shouldKeepExistingGuiSecretProvider(existingProvider, incomingProvider,
   if (!isConfiguredLimitProvider(existingProvider)) return false;
   const existingRuntime = String(existingRecord?.agentRuntime || '').trim();
   const incomingRuntime = String(incomingRecord?.agentRuntime || '').trim();
+  // Managed Copilot profiles belong to the widget, even after headless usage
+  // uploads replace the device-level runtime stamp. The widget can still clear
+  // its own profiles explicitly.
+  if (incomingProvider.provider === 'copilot' && existingProvider.sourceDetail === 'managed') {
+    return incomingRuntime === 'headless-agent';
+  }
   return Boolean(existingRuntime && incomingRuntime && existingRuntime !== incomingRuntime);
 }
 
@@ -1645,7 +1651,12 @@ function mergeDeviceLimits(existingRecord, incomingRecord) {
   }
   return {
     ...incomingLimits,
-    providers: incomingLimits.providers.map((provider) => {
+    providers: incomingLimits.providers.flatMap((provider) => {
+      if (provider.provider === 'copilot' && provider.status === 'notConfigured') {
+        const retained = existingLimits.providers.filter(existing => existing.provider === 'copilot'
+          && shouldKeepExistingGuiSecretProvider(existing, provider, existingRecord, incomingRecord));
+        if (retained.length) return retained;
+      }
       const existing = existingByKey.get(limitProviderMergeKey(provider));
       if (shouldKeepExistingGuiSecretProvider(existing, provider, existingRecord, incomingRecord)) return existing;
       return provider;
@@ -2396,6 +2407,7 @@ module.exports = {
   PERIODS,
   UNATTRIBUTED_USAGE_CLIENT,
   addPeriodInto,
+  isPeriodExpired,
   aggregateDevices,
   aggregateHistory,
   applyPeriodDelta,
