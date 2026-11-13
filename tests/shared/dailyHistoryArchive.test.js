@@ -1677,6 +1677,90 @@ for (const route of ['live', 'collector-snapshot']) for (const sample of [
   });
 }
 
+// A stored day holds one snapshot per model. When an older build stored the
+// same model under another spelling, normalizing must not add the two up.
+function storedQoderDay(date, rows) {
+  const observations = {};
+  for (const row of rows) {
+    observations[JSON.stringify([row.client || 'qodercn', row.modelId])] = {
+      client: 'qodercn', cost: 0, messages: 1, ...row
+    };
+  }
+  return { version: 1, days: { [date]: { date, activeTimeMs: 0, observations } } };
+}
+
+function onlyObservation(archive, date) {
+  const observations = Object.values(archive.days[date].observations);
+  assert.equal(observations.length, 1);
+  return observations[0];
+}
+
+test('a stored raw Qoder CN code and its display name count once', () => {
+  const date = '2026-10-30';
+  const archive = normalizeDailyHistoryArchive(storedQoderDay(date, [
+    { modelId: 'Qwen3.8-Flash', tokens: 1200, cost: 0.5, messages: 4, outputTokens: 200, tokenComponentsAvailable: true, cacheReadTokens: 1000 },
+    { modelId: 'qfmodel', tokens: 1200, cost: 0.5, messages: 4, outputTokens: 200, tokenComponentsAvailable: true, cacheReadTokens: 1000 }
+  ]));
+  const observation = onlyObservation(archive, date);
+  assert.equal(observation.modelId, 'qwen3.8-flash');
+  assert.equal(observation.tokens, 1200);
+  assert.equal(observation.cost, 0.5);
+  assert.equal(observation.messages, 4);
+  assert.equal(observation.cacheReadTokens, 1000);
+  assert.equal(observation.outputTokens, 200);
+});
+
+test('colliding stored spellings keep the larger snapshot, whichever comes first', () => {
+  const date = '2026-10-31';
+  const small = { modelId: 'qfmodel', tokens: 800, cost: 0.25, messages: 2 };
+  const large = { modelId: 'Qwen3.8-Flash', tokens: 1500, cost: 0.75, messages: 5 };
+  for (const rows of [[small, large], [large, small]]) {
+    const observation = onlyObservation(normalizeDailyHistoryArchive(storedQoderDay(date, rows)), date);
+    assert.equal(observation.tokens, 1500);
+    assert.equal(observation.cost, 0.75);
+    assert.equal(observation.messages, 5);
+  }
+});
+
+test('Cursor auto stored beside cursor-auto counts once', () => {
+  const date = '2026-10-29';
+  const archive = normalizeDailyHistoryArchive({ version: 1, days: { [date]: { date, activeTimeMs: 0, observations: {
+    '["cursor","auto"]': { client: 'cursor', modelId: 'auto', tokens: 300, cost: 0.1, messages: 3 },
+    '["cursor","cursor-auto"]': { client: 'cursor', modelId: 'cursor-auto', tokens: 300, cost: 0.1, messages: 3 }
+  } } } });
+  const observation = onlyObservation(archive, date);
+  assert.equal(observation.modelId, 'cursor-auto');
+  assert.equal(observation.tokens, 300);
+});
+
+test('one scan\'s rows for a code and its display name still add up', () => {
+  const date = '2026-11-01';
+  const archive = normalizeDailyHistoryArchive({ version: 1, days: { [date]: { date, activeTimeMs: 0, observations: [
+    { client: 'qodercn', modelId: 'qfmodel', tokens: 100, cost: 0.1, messages: 1 },
+    { client: 'qodercn', modelId: 'Qwen3.8-Flash', tokens: 50, cost: 0.05, messages: 1 }
+  ] } } });
+  const observation = onlyObservation(archive, date);
+  assert.equal(observation.tokens, 150);
+  assert.equal(observation.messages, 2);
+});
+
+test('a rescan of a day stored under both spellings neither doubles nor lowers it', () => {
+  const date = '2026-11-02';
+  const stored = storedQoderDay(date, [
+    { modelId: 'Qwen3.8-Flash', tokens: 1200, cost: 0.5, messages: 4 },
+    { modelId: 'qfmodel', tokens: 1200, cost: 0.5, messages: 4 }
+  ]);
+  for (const tokens of [1200, 900]) {
+    const archive = captureDailyHistoryArchive(stored, graph(date, [client('qodercn', 'qfmodel', tokens, 0.5, 4)]), { todayKey: '2026-11-05' });
+    assert.equal(onlyObservation(archive, date).tokens, 1200);
+    const rows = graphFromDailyHistoryArchive([], archive, { todayKey: '2026-11-05' }).contributions
+      .find(row => row.date === date).clients;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].messages, 4);
+    assert.equal(rows[0].cost, 0.5);
+  }
+});
+
 test('new calendar captures leave unknown legacy history untouched, without recovery', () => {
   const legacy = captureLiveDailyHistory({}, livePeriod(1300), { todayKey: '2026-11-07' });
   const historical = captureDailyHistoryArchive(legacy, graph('2026-11-06', [client('claude', 'opus', 900, 1, 1)]));
