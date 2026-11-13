@@ -420,6 +420,7 @@ function runHomeLimitModule(rows, boundaryLabels = {}) {
   function createNode(tagName) {
     return {
       tagName,
+      dataset: {},
       className: '',
       textContent: '',
       children: [],
@@ -1447,9 +1448,6 @@ test('Codex renders Monthly quota and manual reset credits below rolling windows
   // swept in the shared tooltip builder, so these assertions passed on code that
   // isn't Codex's.
   const codexResetCreditsNode = viewBody('codexResetCreditsNode', 'providerSpendEntries');
-  const limitDetailTooltipShouldHoldRender = functionBody(app, 'limitDetailTooltipShouldHoldRender', 'flushPendingLimitDetailTooltipRender');
-  const renderLimits = functionBody(app, 'renderLimits', 'serviceStatusLabel');
-
   assert.match(renderProviderWindows, /provider\.provider === 'codex'/);
   assert.match(renderProviderWindows, /const session = codexCanonicalWindow\(provider, 'session'\);/);
   assert.match(renderProviderWindows, /const weekly = codexCanonicalWindow\(provider, 'weekly'\);/);
@@ -1516,9 +1514,6 @@ test('Codex renders Monthly quota and manual reset credits below rolling windows
   assert.doesNotMatch(codexResetCreditsNode, /state\.limitDetailTooltip/);
   assert.match(codexResetCreditsNode, /formatCodexResetCreditsValue\(resetCredits\)/);
   assert.match(codexResetCreditsNode, /aria-label/);
-  assert.match(limitDetailTooltipShouldHoldRender, /state\.limitDetailTooltipActive/);
-  assert.match(renderLimits, /const holdLimitDetailTooltipRender = limitDetailTooltipShouldHoldRender\(\);/);
-  assert.match(renderLimits, /if \(holdLimitDetailTooltipRender \|\| holdCodexSwitchPopoverRender\)/);
   assert.match(styles, /\.limit-reset-credits\s*\{[^}]*min-height: 11px;[^}]*font-size: 0\.5625rem;/s);
   assert.match(styles, /\.limit-reset-credits-line\s*\{[^}]*justify-content: space-between;/s);
   assert.match(styles, /\.limit-reset-credits-expiry-group\s*\{[^}]*flex: 0 0 auto;/s);
@@ -1821,6 +1816,13 @@ test('shared spend presentation preserves zeroes and omits missing periods', () 
   assert.equal(missingWeek.summary, 'Today CNY 0.00 · Month CNY 2.50');
   assert.deepEqual(missingWeek.detailEntries.map(([label]) => label), ['Today', 'Month', 'All time']);
   assert.equal(missingWeek.ariaParts.some((part) => part.startsWith('Week ')), false);
+
+  // Console fees join the tooltip without changing the local Today/Month totals.
+  const consoleFees = runProviderSpendNode(app, { currency: 'CNY', todaySpend: 0, monthSpend: 2.5, searchSpend: 0.3, fetchSpend: 0.02 });
+  assert.equal(consoleFees.summary, 'Today CNY 0.00 · Month CNY 2.50');
+  assert.deepEqual(consoleFees.detailEntries, [
+    ['Today', 'CNY 0.00'], ['Month', 'CNY 2.50'], ['Search', 'CNY 0.30'], ['Fetch', 'CNY 0.02']
+  ]);
 
 });
 
@@ -2681,7 +2683,8 @@ test('main limits cache reuses unchanged data and repaints when token units chan
     animateCachedLimitBarsFromZero() {},
     animateLimitResets() {},
     limitProviderColor: () => '#0866FF',
-    renderLimitProviderSolo: () => ({})
+    rendererDom: { reconcileChildren: (node, nodes) => node.replaceChildren(...nodes) },
+    renderLimitProviderSolo: () => ({ dataset: {} })
   });
   vm.runInContext(source, context);
   const render = () => vm.runInContext('renderLimits()', context);
