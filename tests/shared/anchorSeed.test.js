@@ -119,7 +119,8 @@ test('the cold-start seed accepts a JSONL-only Qoder CN anchor', () => {
   const clients = 'claude,qodercn';
   const options = { clients, homeDir, env: {} };
   const anchor = anchorFixture({
-    configFingerprint: configFingerprint(clients, ALL_TIME_SINCE, true, null, undefined, options)
+    configFingerprint: configFingerprint(clients, ALL_TIME_SINCE, true, null, undefined, options),
+    qoderCnModelVersion: 2
   });
   const record = deviceRecordFromAnchor(anchor, seedOptions(options));
   assert.equal(record.today.totalTokens, 1_000);

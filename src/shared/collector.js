@@ -74,6 +74,7 @@ const { normalizeReasoningEffort, isSessionReasoningEffortClient } = require('./
 const { readT3Activities } = require('./t3SessionActivity');
 const { createProcessStartBatch } = require('./processStarts');
 const { catpawDatabaseName, catpawSourcesFingerprint } = require('./providers/catpaw/paths');
+const { convertUsd } = require('./currency');
 const { readLocalUsageView, resolveLocalUsagePricing } = require('./providers/codex/localUsage');
 const { createLocalUsageSource } = require('./providers/codex/localUsageSource');
 const {
@@ -220,6 +221,18 @@ function tokscaleEnvWithBlanksDropped(env, platform = process.platform) {
   return dropped || env;
 }
 
+// Qoder CN resource packs are CNY 40 / 1,000 credits. Convert at the
+// same effective CNY rate as the rest of the app; standalone agents use the
+// currency module's built-in rate unless an explicit native override is set.
+function qoderCnCreditUsdRate(options = {}) {
+  const envOverride = Number(process.env.TOKEN_MONITOR_QODER_CN_USD_PER_CREDIT);
+  if (Number.isFinite(envOverride) && envOverride > 0) return envOverride;
+  const suppliedRate = Number(options.qoderCnUsdPerCredit);
+  return Number.isFinite(suppliedRate) && suppliedRate > 0
+    ? suppliedRate
+    : 0.04 / convertUsd(1, 'CNY');
+}
+
 function tokscaleCommand(options = {}) {
   const resolved = resolvePlatformBinary();
   const useDirect = Boolean(resolved && resolved.source !== 'shim');
@@ -231,7 +244,10 @@ function tokscaleCommand(options = {}) {
   const extraDirsEnv = customExtraDirs
     ? { ...process.env, TOKSCALE_EXTRA_DIRS: customExtraDirs }
     : process.env;
-  const env = tokscaleEnvWithBlanksDropped(extraDirsEnv, options.platform || process.platform);
+  const env = {
+    ...tokscaleEnvWithBlanksDropped(extraDirsEnv, options.platform || process.platform),
+    TOKEN_MONITOR_QODER_CN_USD_PER_CREDIT: String(qoderCnCreditUsdRate(options))
+  };
   const command = useDirect
     ? { bin: resolved.path, prefixArgs: [], env }
     : { bin: process.execPath, prefixArgs: [TOKSCALE_BIN_JS], env: { ...env, ELECTRON_RUN_AS_NODE: '1' } };
@@ -624,6 +640,7 @@ function runTokscale({
   onTerminationUnconfirmed,
   customScanPaths,
   homeDir,
+  qoderCnUsdPerCredit,
   offlinePricing = false,
   workspaces = true,
   offline = false,
@@ -631,7 +648,7 @@ function runTokscale({
   timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone
 }) {
   throwIfAborted(signal);
-  const command = tokscaleCommand({ customScanPaths, homeDir });
+  const command = tokscaleCommand({ customScanPaths, homeDir, qoderCnUsdPerCredit });
   const requested = tokscaleClientFilter(clients);
   if (!requested) return Promise.resolve({ entries: [] });
   const clientFilter = applyKnownCapabilityFilter(requested, command.identity);
@@ -683,9 +700,9 @@ function runTokscale({
   ), signal, cursorLifecycleHeld || (offline && flags.includes('--home')));
 }
 
-function runTokscaleGraph({ clients, commandTimeoutMs, signal, terminationOptions, onTerminationUnconfirmed, customScanPaths, homeDir, offline = false, cursorLifecycleHeld = false, offlinePricing = false, timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone }) {
+function runTokscaleGraph({ clients, commandTimeoutMs, signal, terminationOptions, onTerminationUnconfirmed, customScanPaths, homeDir, qoderCnUsdPerCredit, offline = false, cursorLifecycleHeld = false, offlinePricing = false, timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone }) {
   throwIfAborted(signal);
-  const command = tokscaleCommand({ customScanPaths, homeDir });
+  const command = tokscaleCommand({ customScanPaths, homeDir, qoderCnUsdPerCredit });
   const requested = tokscaleClientFilter(clients);
   if (!requested) return Promise.resolve({ contributions: [] });
   const clientFilter = applyKnownCapabilityFilter(requested, command.identity);
@@ -926,6 +943,7 @@ async function collectHistoryOnce(options) {
     try {
       const graphJson = await runGraph({
         clients,
+        qoderCnUsdPerCredit: options.qoderCnUsdPerCredit,
         timeZone: options.timeZone,
         commandTimeoutMs: options.commandTimeoutMs || HISTORY_TIMEOUT_MS,
         signal: options.signal
@@ -1058,6 +1076,7 @@ async function collectUsageOnce(options) {
     workspaces: projectsEnabled,
     offlinePricing: options.offlinePricing,
     customScanPaths: options.customScanPaths,
+    qoderCnUsdPerCredit: options.qoderCnUsdPerCredit,
     homeDir: options.homeDir,
     terminationOptions: options.subprocessTerminationOptions,
     onTerminationUnconfirmed: () => reportTerminationUnconfirmed('tokscale-scan')
@@ -1082,6 +1101,7 @@ async function collectUsageOnce(options) {
     ...input,
     offlinePricing: options.offlinePricing,
     customScanPaths: options.customScanPaths,
+    qoderCnUsdPerCredit: options.qoderCnUsdPerCredit,
     homeDir: options.homeDir,
     terminationOptions: options.subprocessTerminationOptions,
     onTerminationUnconfirmed: () => reportTerminationUnconfirmed('tokscale-graph')
@@ -2482,6 +2502,10 @@ function pricingFingerprint(options = {}) {
   const hash = createHash('sha256');
   hash.update(JSON.stringify(catalogRevision({ env: tokscaleEnvWithBlanksDropped(process.env) })));
   hash.update(pricingPath);
+  const clients = normalizeClientsCsv(options.clients);
+  if (!clients || clients.split(',').includes('qodercn')) {
+    hash.update(`|qoderCnCreditUsdRate:${qoderCnCreditUsdRate(options)}`);
+  }
   try { hash.update(fs.readFileSync(pricingPath)); }
   catch (error) { hash.update(`|file:${error.code || 'unreadable'}`); }
   if (options.binaryRevision !== undefined) {
@@ -2497,7 +2521,7 @@ function pricingFingerprint(options = {}) {
   return hash.digest('hex');
 }
 
-function configFingerprint(clientsCsv, allTimeSince, projectsEnabled = true, customScanPaths = null, pricingRevision = pricingFingerprint(), sourceOptions = {}, catpawRevision = catpawSourcesFingerprint(normalizeClientsCsv(clientsCsv), sourceOptions)) {
+function configFingerprint(clientsCsv, allTimeSince, projectsEnabled = true, customScanPaths = null, pricingRevision = pricingFingerprint({ clients: clientsCsv }), sourceOptions = {}, catpawRevision = catpawSourcesFingerprint(normalizeClientsCsv(clientsCsv), sourceOptions)) {
   // Source changes invalidate the persisted anchor before any Today delta.
   const qoderCnProjectsPart = normalizeClientsCsv(clientsCsv).split(',').includes('qodercn')
     ? `|qodercnProjects:${clientSourceRoots('qodercn', sourceOptions).qodercn[0].dir}` : '';
@@ -2546,6 +2570,9 @@ function collectorAnchorTrust(saved, options = {}) {
   // Old Cursor anchors preserve `default` in their broad-period model maps;
   // applying a new `cursor-auto` Today delta to them would split one mode.
   if (normalizeClientsCsv(clients).split(',').includes('cursor') && saved.cursorAutoModelVersion !== 1) return null;
+  // Qoder CN version 2 also canonicalizes source-qualified JSONL sessions.
+  // Old broad-period maps cannot be combined with a new canonical Today delta.
+  if (normalizeClientsCsv(clients).split(',').includes('qodercn') && saved.qoderCnModelVersion !== 2) return null;
   const fingerprintAt = (revision) => configFingerprint(clients, allTimeSince, projectsEnabled, customScanPaths, revision, options);
   if (saved.configFingerprint !== fingerprintAt(options.pricingRevision ?? pricingFingerprint(options))) {
     if (options.allowRepricing !== true) return null;
@@ -3110,6 +3137,7 @@ function startCollector(options) {
         calendarKey: anchor.calendarKey,
         sessionIdentityVersion: anchor.sessionIdentityVersion,
         cursorAutoModelVersion: 1,
+        qoderCnModelVersion: 2,
         today: anchor.today,
         month: anchor.month,
         allTime: anchor.allTime,
