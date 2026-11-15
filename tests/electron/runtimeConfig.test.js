@@ -199,9 +199,22 @@ test('diagnostic configuration projects effective normalized values without cred
     wslScanEnabled: false,
     syncUploadIntervalMs: 20 * 60 * 1000,
     limitsRefreshMode: 'fixed',
-    limitsRefreshMs: 5 * 60 * 1000
+    limitsRefreshMs: 5 * 60 * 1000,
+    networkProxySource: 'system',
+    claudeCliFallbackEnabled: true
   });
   assert.equal(JSON.stringify(configuration).includes('secret'), false);
+});
+
+test('diagnostic configuration names the proxy source without its URL', () => {
+  const context = { limits: { env: { HTTPS_PROXY: 'http://user:env-secret@proxy.example:8080' } } };
+  const fromEnv = diagnosticConfigurationFromSettings({ claudeCliFallbackEnabled: false }, context);
+  assert.equal(fromEnv.networkProxySource, 'environment');
+  assert.equal(fromEnv.claudeCliFallbackEnabled, false);
+  const fromSetting = diagnosticConfigurationFromSettings({ proxyUrl: 'http://proxy.example:3128' }, context);
+  assert.equal(fromSetting.networkProxySource, 'setting');
+  assert.equal(JSON.stringify([fromEnv, fromSetting]).includes('secret'), false);
+  assert.equal(JSON.stringify([fromEnv, fromSetting]).includes('proxy.example'), false);
 });
 
 test('diagnostic configuration preserves a custom all-time date and false flags', () => {
@@ -658,13 +671,15 @@ test('effective credit FX is serializable and participates in worker runtime rep
 });
 
 test('credit FX does not replace a usage runtime that excludes Qoder CN', () => {
-  for (const clients of [undefined, null, 'claude', 'codex', 'claude,codex']) {
+  // Qoder CN is default-tracked since v0.93.0, so an unset client list counts as
+  // tracking it; only explicit lists without it must drop the credit FX.
+  for (const clients of ['claude', 'codex', 'claude,codex']) {
     const first = usageConfigFromSettings({ clients }, { qoderCnUsdPerCredit: 0.006 });
     const second = usageConfigFromSettings({ clients }, { qoderCnUsdPerCredit: 0.007 });
     assert.equal(first.qoderCnUsdPerCredit, undefined, String(clients));
     assert.equal(usageConfigFingerprint(first), usageConfigFingerprint(second), String(clients));
   }
-  for (const clients of ['', 'qodercn', 'claude,qodercn', ' QODERCN ']) {
+  for (const clients of [undefined, null, '', 'qodercn', 'claude,qodercn', ' QODERCN ']) {
     const first = usageConfigFromSettings({ clients }, { qoderCnUsdPerCredit: 0.006 });
     const second = usageConfigFromSettings({ clients }, { qoderCnUsdPerCredit: 0.007 });
     assert.notEqual(usageConfigFingerprint(first), usageConfigFingerprint(second), String(clients));
