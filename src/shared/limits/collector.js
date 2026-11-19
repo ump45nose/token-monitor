@@ -1,5 +1,7 @@
 'use strict';
 
+const { accountSlotJobs } = require('./accountSlotFetcher');
+const { mergedOwnerAccounts } = require('./ownerAccountSlots');
 const { LIMIT_PROVIDER_IDS } = require('./providers');
 const { LIMIT_PROVIDER_FETCHERS, limitProviderEntry } = require('./registry');
 const {
@@ -141,7 +143,7 @@ function providerPhysicalBoundMs(provider, options = {}, deps = {}) {
     : DEFAULT_PROVIDER_PHYSICAL_BOUND_MS;
   let jobs = 1;
   if (provider === 'claude') {
-    jobs = claudeLimits.normalizeClaudeManagedAccounts(options.claudeManagedAccounts).filter((account) => account.enabled).length
+    jobs = claudeLimits.normalizeClaudeManagedAccounts(mergedOwnerAccounts(options, 'claude', options.claudeManagedAccounts || [])).filter((account) => account.enabled).length
       + (claudeWebCookie(deps.env || process.env, options) ? 1 : 0) + 1;
   }
   if (provider === 'codex') {
@@ -160,6 +162,8 @@ function providerPhysicalBoundMs(provider, options = {}, deps = {}) {
       ? 1
       : Math.max(1, managed.length + 1);
   }
+  const entry = limitProviderEntry(provider);
+  if (entry?.accountSlots && provider !== 'claude') jobs = accountSlotJobs(entry, options, deps);
   return base * jobs;
 }
 
@@ -213,7 +217,13 @@ async function probeLimitProvider(provider, options = {}, context = {}, deps = {
       // (one account of several, a fallback source) reports the cause here.
       ...(context.onFailure ? { noteLimitFailure: context.onFailure } : {})
     });
-    return (Array.isArray(result) ? result : [result]).filter(Boolean);
+    const entry = limitProviderEntry(provider);
+    const products = [...new Set((entry?.sources || []).flatMap(source => source.products))];
+    return (Array.isArray(result) ? result : [result]).filter(Boolean).map(row => ({
+      ...row,
+      ...(Array.isArray(row.windows) ? { windows: row.windows.map(window => ({ ...window,
+        ...(!window.productId && products.length === 1 ? { productId: products[0] } : {}) })) } : {})
+    }));
   } catch (error) {
     context.onFailure?.(error);
     return [statusProvider(provider, providerStatusFromError(error), nowIso(nowMs))];
