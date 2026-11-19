@@ -6,13 +6,29 @@ Sources:
   - actions/search.svg: search
   - actions/settings.svg: settings
   - actions/pencil-line.svg: pencil-line
+  - actions/key.svg: key
+  - actions/clock.svg: clock
+  - actions/circle-minus.svg: circle-minus
+  - actions/circle-exclamation-point.svg: circle-exclamation-point
+    (clock, circle-minus and circle-exclamation-point copied from upstream commit `149eba0aea48178a5ab1efe2c701de1da94f4be8`)
+  - actions/pause.svg: pause
+  - actions/play.svg: play
+    (key, pause and play copied from upstream commit `f8feea7a02ea461c9f2a4b4d851512aae6ec933f`)
   - actions/trash.svg: trash
   - actions/download.svg: download
   - actions/rotate-cw.svg: rotate-cw
   - actions/external-link.svg: external-link
+  - actions/chevron-down.svg: chevron-down
   - actions/ellipsis.svg: ellipsis
   - actions/shield-check.svg: shield-check
   - actions/check.svg: check (stroke widened to 3 for legibility as a small badge)
+  - sources/terminal.svg: terminal
+  - sources/monitor.svg: monitor
+  - sources/globe.svg: globe
+  - sources/lock.svg: lock
+  - sources/file.svg: file
+  - sources/variable.svg: variable
+    (sources/* copied from lucide-static v0.460.0)
   - settings/general.svg: sliders-horizontal
   - settings/main.svg: panels-top-left
   - settings/collection.svg: database

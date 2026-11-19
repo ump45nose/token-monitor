@@ -47,3 +47,7 @@ node --test tests/shared/grokLimits.test.js tests/shared/grokSessionMetadata.tes
 ## Quota account identity
 
 Grok quota history keys xAI OIDC credentials by the `https://auth.x.ai` issuer and non-empty `sub`, so token refreshes retain the same account history. Email is display metadata only: different subjects remain separate even if their emails match. When `GROK_AUTH` overrides the CLI login, quota lookup uses web billing with the resolved credential so its account identity matches the authenticated request. Opaque tokens, unknown issuers and malformed identities retain token-based keys. Existing token-keyed history is not migrated or merged automatically.
+
+## Collection sources
+
+Collection tries CLI RPC first and falls back to Web billing when an `auth.json` credential is available and RPC fails for a reason other than authorization. RPC remains unavailable for an environment credential or WSL credential where the CLI cannot authenticate the resolved account. Both paths retain the existing subject-based identity rule.

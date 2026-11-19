@@ -402,6 +402,8 @@ for (const { name, settings, expected } of [
     const body = { children: [], append(element) { this.children.push(element); } };
     vm.runInNewContext(`${functions}\nrenderHomeLimitModule();`, {
       state: { settings, stats: { limits: { providers: [] } } },
+      accountSlotLists: {},
+      window: { TokenMonitorAccountSlotsPanel: require('../../src/electron/renderer/limits/accountSlotsPanel') },
       LIMIT_PROVIDERS: [{ id: 'claude', label: 'Claude' }],
       DEFAULT_LIMIT_PROVIDER_ORDER: 'claude',
       limitProviderOrderApi,
@@ -443,6 +445,7 @@ test('Home keeps both MiniMax readings named and in their own units', () => {
   for (const showHomeLimitProviderNames of [false, true]) {
     settings.showHomeLimitProviderNames = showHomeLimitProviderNames;
     const rows = vm.runInNewContext(`${fn}\nhomeLimitRows();`, {
+      accountSlotLists: {},
       state: { settings, stats: { limits: { providers } } },
       desktopLimitProviders: () => [{ id: 'minimax', label: 'Minimax' }], desktopLimitRecords: () => providers,
       LIMIT_PROVIDERS: [{ id: 'minimax', label: 'Minimax' }],
@@ -800,6 +803,15 @@ test('patchDailyToday appends today with live cost so its heatmap cell is not em
   assert.equal(appended.date, '2026-07-07');
   assert.equal(appended.tokens, 61_700_000);
   assert.equal(appended.cost, 492.5); // intensity uses cost — a 0 here renders today as empty
+});
+
+test('patchDailyToday replaces stale unpriced coverage with the live today value', () => {
+  const daily = [{ date: '2026-07-07', tokens: 100, cost: 1, unpricedTokens: 20 }];
+  const patched = patchDailyToday(daily, '2026-07-07', 120, 1.5, 0);
+  assert.equal(patched[0].unpricedTokens, undefined);
+  const unpriced = patchDailyToday(daily, '2026-07-07', 120, 1.5, 30);
+  assert.equal(unpriced[0].unpricedTokens, 30);
+  assert.equal(daily[0].unpricedTokens, 20);
 });
 
 test('renderHomeTrendsModule preserves long-range Activity and peak', () => {
