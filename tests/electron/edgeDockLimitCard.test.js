@@ -925,6 +925,7 @@ test('Home text and bars use the plan text rendered by Limits account rows', () 
           .filter((node) => node.classNames.has('limit-row') && node.children[1]?.classNames?.has('limit-windows'))
           .map((row) => row.children[0].find('limit-plan').textContent);
         const home = vm.runInNewContext(`${app.slice(start, end)}; homeLimitRows();`, {
+          accountSlotLists: {},
           state: { stats: { limits: { providers } }, settings },
           enabledLimitProviderSet: () => new Set([id]),
           hiddenHomeLimitProviderSet: () => new Set(),
@@ -1848,10 +1849,9 @@ for (const id of ['codex', 'minimax']) {
     assert.equal(group.find('limit-plan').textContent, '4 accounts');
     assert.equal([...group.walk()].filter((node) => node.classNames.has('limit-account-row')).length, 4);
 
-    // A provider with no count phrase of its own prints nothing rather than the
-    // untranslated key.
+    // Providers without specialized wording show the shared localized count.
     const untranslated = dockView().renderLimitProviderGroup('deepseek', 'DeepSeek', [account('a@x'), account('b@x')], '#4D6BFE');
-    assert.equal(untranslated.find('limit-plan').textContent, '');
+    assert.equal(untranslated.find('limit-plan').textContent, '2 accounts');
   });
 }
 

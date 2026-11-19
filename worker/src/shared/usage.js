@@ -735,7 +735,9 @@ function emptySession(client, id) {
 
 const sessionsWithLiveSource = new WeakSet();
 
-function mergeSession(target, source) {
+// `now` judges live-activity observations, which a future peer clock must not
+// set; it defaults to the wall clock.
+function mergeSession(target, source, now) {
   mergeSessionModelComponents(target, source);
   const sourceTokens = Math.max(0, Math.round(asNumber(source.totalTokens)));
   target.totalTokens += sourceTokens;
@@ -827,7 +829,7 @@ function mergeSession(target, source) {
   // token or transcript write. An explicit unknown reading clears old evidence.
   if (isSessionActivityClient(source.client)) {
     const reading = normalizeLiveActivity(source.liveActivity);
-    if (reading && canReplaceLiveActivity(target.liveActivity, reading)) {
+    if (reading && canReplaceLiveActivity(target.liveActivity, reading, now)) {
       target.liveActivity = reading;
     }
   }
@@ -864,12 +866,12 @@ function mergeSession(target, source) {
   return target;
 }
 
-function addSession(period, session) {
+function addSession(period, session, now) {
   if (!session?.client || !session?.sessionId || isReasonixSyntheticSession(session)) return;
   const key = sessionKey(session.client, session.sessionId);
   if (isReasonixSyntheticSession(session, key)) return;
   if (!period.sessions[key]) period.sessions[key] = emptySession(session.client, session.sessionId);
-  mergeSession(period.sessions[key], session);
+  mergeSession(period.sessions[key], session, now);
 }
 
 function sessionFromRow(row) {
@@ -1086,6 +1088,8 @@ function normalizePeriod(input, options = {}) {
     return period;
   }
   const projectsEnabled = options.projectsEnabled !== false;
+  // The clock live activity is judged against; the wall clock unless given.
+  const now = options.nowMs;
   period.totalTokens = Math.max(0, Math.round(asNumber(input.totalTokens ?? input.total_tokens ?? 0)));
   const componentCapability = input.capabilities?.tokenComponents;
   const hasLegacyComponentShape = [
@@ -1231,13 +1235,13 @@ function normalizePeriod(input, options = {}) {
   reconcileClientRenamedGlobalModels(period, input);
   if (input.sessions && typeof input.sessions === 'object') {
     for (const [key, value] of Object.entries(input.sessions)) {
-      const session = normalizeSession(sessionWithActivity(input, key, value), key);
+      const session = normalizeSession(sessionWithActivity(input, key, value, now), key);
       if (!session) continue;
       if (!projectsEnabled) {
         session.projectId = '';
         session.projectLabel = '';
       }
-      addSession(period, session);
+      addSession(period, session, now);
     }
   }
   period.projects = projectsEnabled
@@ -1456,7 +1460,11 @@ function normalizeRecordHistoryFields(record, nowIso = new Date().toISOString())
   return fields;
 }
 
-function normalizeDeviceRecord(record) {
+// `options.normalizePeriod` lets a caller that sees the same period object in
+// several records reuse its normalization. It must return what normalizePeriod
+// would, and whatever it returns is read, never mutated.
+function normalizeDeviceRecord(record, options = {}) {
+  const normalizeRecordPeriod = options.normalizePeriod || normalizePeriod;
   const nowIso = new Date().toISOString();
   const historyFields = normalizeRecordHistoryFields(record, nowIso);
   const normalized = {
@@ -1504,7 +1512,7 @@ function normalizeDeviceRecord(record) {
     normalized.allTimeTokensUnavailable = true;
   }
   for (const periodName of PERIODS) {
-    normalized.periods[periodName] = normalizePeriod(record[periodName] || record.periods?.[periodName], {
+    normalized.periods[periodName] = normalizeRecordPeriod(record[periodName] || record.periods?.[periodName], {
       projectsEnabled: normalized.projectsEnabled !== false
     });
   }
@@ -1649,17 +1657,6 @@ function preserveUntrackedClientUsage(existingRecord, incomingRecord, trackedCli
   }
 }
 
-function limitProviderMergeKey(provider) {
-  const name = String(provider?.provider || '').trim();
-  if (!name) return '';
-  if (GUI_SECRET_LIMIT_PROVIDERS.has(name) && name !== 'copilot') return name;
-  const accountKey = String(provider?.accountKey || '').trim();
-  if (accountKey) return `${name}:${accountKey}`;
-  const accountEmail = String(provider?.accountEmail || '').trim().toLowerCase();
-  if (accountEmail) return `${name}:email:${accountEmail}`;
-  return `${name}:${String(provider?.status || '').trim()}`;
-}
-
 function isConfiguredLimitProvider(provider) {
   return Boolean(provider?.accountKey && provider.status !== 'notConfigured' && provider.status !== 'disabled');
 }
@@ -1685,24 +1682,27 @@ function mergeDeviceLimits(existingRecord, incomingRecord) {
   const incomingLimits = normalizeLimitsSummary(incomingRecord?.limits);
   if (!incomingLimits.providers.length) return incomingLimits;
 
-  const existingByKey = new Map();
-  for (const provider of existingLimits.providers) {
-    const key = limitProviderMergeKey(provider);
-    if (key) existingByKey.set(key, provider);
-  }
-  return {
-    ...incomingLimits,
-    providers: incomingLimits.providers.flatMap((provider) => {
-      if (provider.provider === 'copilot' && provider.status === 'notConfigured') {
-        const retained = existingLimits.providers.filter(existing => existing.provider === 'copilot'
-          && shouldKeepExistingGuiSecretProvider(existing, provider, existingRecord, incomingRecord));
-        if (retained.length) return retained;
-      }
-      const existing = existingByKey.get(limitProviderMergeKey(provider));
-      if (shouldKeepExistingGuiSecretProvider(existing, provider, existingRecord, incomingRecord)) return existing;
-      return provider;
-    })
-  };
+  const retainedProviders = new Set();
+  // An account the incoming summary reports itself is not restored beside it.
+  const incomingAccounts = new Set(incomingLimits.providers.filter(provider => provider.accountKey)
+    .map(provider => `${provider.provider}:${provider.accountKey}`));
+  const providers = incomingLimits.providers.flatMap((provider) => {
+    if (GUI_SECRET_LIMIT_PROVIDERS.has(provider.provider) && provider.status === 'notConfigured') {
+      // Several placeholders for one provider must not each restore the accounts.
+      if (retainedProviders.has(provider.provider)) return [];
+      const retained = existingLimits.providers.filter(existing => existing.provider === provider.provider
+        && !incomingAccounts.has(`${existing.provider}:${existing.accountKey}`)
+        && shouldKeepExistingGuiSecretProvider(existing, provider, existingRecord, incomingRecord));
+      if (!retained.length) return provider;
+      retainedProviders.add(provider.provider);
+      return retained;
+    }
+    return provider;
+  });
+  // A credential-less runtime cannot revoke the signal for accounts it keeps.
+  const multiAccountProviders = [...(incomingLimits.multiAccountProviders || []),
+    ...(existingLimits.multiAccountProviders || []).filter(id => retainedProviders.has(id))];
+  return normalizeLimitsSummary({ ...incomingLimits, multiAccountProviders, providers });
 }
 
 function mergeDeviceRecord(existing, incoming) {
