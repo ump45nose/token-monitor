@@ -152,7 +152,7 @@ test('credential saves and clears wait for persistence and propagate storage fai
         let settled = false;
         const result = operation === 'save'
           ? api.saveCredential('deepseek', { deepseekApiKey: 'sk-draft' })
-          : api.clearCredential('deepseek');
+          : api.clearCredential('claude');
         void result.then(() => { settled = true; }, () => { settled = true; });
         await entered.promise;
         await new Promise((resolve) => setImmediate(resolve));
@@ -218,8 +218,10 @@ test('a stale probe that was rejected still reports superseded, not invalid', as
 
 test('clearing removes the form credential through the same settings write', async () => {
   const { api, patches } = commands();
-  assert.deepEqual(await api.clearCredential('minimax'), { cleared: true, settings: { projected: true } });
-  assert.deepEqual(patches, [{ minimaxApiKey: '' }]);
+  assert.deepEqual(await api.clearCredential('minimax'), { cleared: false, errorCode: 'accountSlotRequired' });
+  assert.deepEqual(patches, []);
+  assert.equal((await api.clearCredential('claude')).cleared, true);
+  assert.equal(patches.length, 1);
   assert.deepEqual(await api.clearCredential('codex'), { cleared: false });
 });
 
@@ -602,4 +604,50 @@ test('Trae Cookie save probes the two-hop web route, replaces the legacy token, 
   const expired = commands({ answer: () => response(401), settings: { traeAccessToken: 'old-token' } });
   assert.equal((await expired.api.saveCredential('trae', { traeCookie: 'sessionid=expired' })).saved, false);
   assert.deepEqual(expired.patches, []);
+});
+
+test('OpenDesign cookie saves probe the workspace and quota, reject expired sessions and require slot commands to clear', async () => {
+  const calls = [];
+  const { api, patches } = commands({ answer: (url, init) => {
+    calls.push({ url, init });
+    return response(200, url.endsWith('/current') ? { workspaceId: 'workspace-test' } : {
+      workspaceId: 'workspace-test', eligible: true,
+      windows: [{ durationSeconds: 18000, usedCredits: 0, limitCredits: 100 }]
+    });
+  } });
+  const result = await api.saveCredential('opendesign', { opendesignCookie: 'Cookie: session=test-only' });
+  assert.equal(result.saved, true);
+  assert.equal(result.verdict, 'valid');
+  assert.equal(patches[0].opendesignCookie, 'session=test-only');
+  assert.ok(patches[0].limitProviders.split(',').includes('opendesign'));
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every(({ init }) => init.headers.Cookie === 'session=test-only'));
+  assert.ok(!JSON.stringify(result).includes('test-only'));
+  assert.deepEqual(await api.clearCredential('opendesign'), { cleared: false, errorCode: 'accountSlotRequired' });
+  assert.equal(patches.length, 1);
+
+  for (const [code, saved, verdict] of [[401, false, 'invalid'], [403, true, 'indeterminate'], [429, true, 'indeterminate']]) {
+    const c = commands({ answer: () => response(code) });
+    const reply = await c.api.saveCredential('opendesign', { opendesignCookie: 'session=test-only' });
+    assert.equal(reply.saved, saved);
+    assert.equal(reply.verdict, verdict);
+  }
+  const c = commands({ answer: () => { throw new Error('malformed draft must not probe'); } });
+  assert.equal((await c.api.saveCredential('opendesign', { opendesignCookie: 'bare-token' })).saved, false);
+  assert.deepEqual(c.patches, []);
+});
+
+for (const { id } of LIMIT_PROVIDER_REGISTRY.filter(entry => entry.accountSlots && entry.id !== 'claude')) test(`legacy clear refuses ${id} account slots without a settings write`, async () => {
+  const { api, patches } = commands({ settings: { [`${id}AccountSlots`]: [{ id: 'migrated', values: {} }] } });
+  assert.deepEqual(await api.clearCredential(id), { cleared: false, errorCode: 'accountSlotRequired' });
+  assert.deepEqual(patches, []);
+});
+
+
+test('Claude legacy clearing preserves owner-backed saved slots and their credentials', async () => {
+  const saved = [{ id: 'saved', owner: { metadata: { organizationId: 'saved-org' }, credential: 'saved-cookie' } }];
+  const { api, patches } = commands({ settings: { claudeAccountSlots: saved, claudeWebCookie: 'sessionKey=sk-ant-old', claudeWebOrganizationId: 'legacy-org' } });
+  assert.equal((await api.clearCredential('claude')).cleared, true);
+  assert.deepEqual(patches, [{ claudeWebCookie: '', claudeWebOrganizationId: '' }]);
+  assert.equal(saved[0].owner.credential, 'saved-cookie');
 });

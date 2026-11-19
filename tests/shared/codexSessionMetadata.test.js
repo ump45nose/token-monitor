@@ -104,8 +104,8 @@ maybe('reads persisted display titles and classifies guardian reviews without ex
 
   assert.deepEqual(result.get('named'), { title: '繼續目前工作' });
   assert.equal(result.has('fallback'), false);
-  assert.equal(result.has('review-model'), false);
-  assert.equal(result.has('review-user'), false);
+  assert.deepEqual(result.get('review-model'), { latestModel: 'codex-auto-review' });
+  assert.deepEqual(result.get('review-user'), { latestModel: 'codex-auto-review' });
   assert.deepEqual(result.get('review-source'), { sessionKind: 'background-review' });
   assert.deepEqual(result.get('review-json-source'), { sessionKind: 'background-review' });
 });
@@ -304,6 +304,74 @@ maybe('title queries also return persisted effort for historical and untitled se
     env: {}, codexDeps: { dbPaths: [file], sqlite }, readT3Meta: () => new Map(), resolveProjects: false
   });
   assert.equal(periods.allTime.sessions['codex:old'].reasoningEffort, 'high');
+});
+
+maybe('the existing catalog query returns normalized models, including model-only sessions', () => {
+  const file = makeDb([
+    { id: 'named', name: 'Conversation', model: ' GPT-6.1-SOL ', effort: 'high' },
+    { id: 'model-only', model: 'deepseek-v4.1-flash' },
+    { id: 'blank', model: '   ' },
+    { id: 'oversized', model: 'x'.repeat(257) }
+  ]);
+  const queries = [];
+  class DatabaseSync extends sqlite.DatabaseSync {
+    prepare(sql) { queries.push(sql); return super.prepare(sql); }
+  }
+  const rows = metadata.readSessionMeta(['named', 'model-only', 'blank', 'oversized'], {
+    dbPaths: [file], sqlite: { DatabaseSync }
+  });
+  assert.deepEqual(rows.get('named'), { title: 'Conversation', latestModel: 'gpt-6.1-sol', reasoningEffort: 'high' });
+  assert.deepEqual(rows.get('model-only'), { latestModel: 'deepseek-v4.1-flash' });
+  assert.equal(rows.has('blank'), false);
+  assert.equal(rows.has('oversized'), false);
+  assert.equal(queries.filter(sql => /FROM threads/.test(sql)).length, 1, 'model and effort share the existing batched query');
+});
+
+maybe('historical and long Codex sessions use catalog models without widening transcript reads', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-model-catalog-'));
+  tmpDirs.push(home);
+  const nativeId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const id = `rollout-2026-11-09T10-00-00-${nativeId}`;
+  const dir = path.join(home, '.codex', 'sessions', '2026', '11', '09');
+  fs.mkdirSync(dir, { recursive: true });
+  const transcript = path.join(dir, `${id}.jsonl`);
+  const at = Date.parse('2026-11-09T10:00:00Z');
+  const line = entry => JSON.stringify(entry) + '\n';
+  fs.writeFileSync(transcript, line({ type: 'session_meta', payload: { id: nativeId } })
+    + line({ type: 'turn_context', payload: { model: 'deepseek-v4.1-flash', effort: 'high' } })
+    + line({ type: 'response_item', payload: { text: 'x'.repeat(2 * 1024 * 1024) } })
+    + line({ type: 'event_msg', payload: { type: 'task_complete' } }));
+  fs.utimesSync(transcript, new Date(at), new Date(at));
+  const file = makeDb([{ id: nativeId, model: 'deepseek-v4.1-flash', effort: 'high' }]);
+  let bytesRead = 0;
+  const codexDeps = { dbPaths: [file], sqlite, cache: new Map(), fs: {
+    ...fs, readSync(...args) { const n = fs.readSync(...args); bytesRead += n; return n; }
+  } };
+  const { applySessionMetadata } = require('../../src/shared/sessionMetadata');
+  const { sessionModelLabel } = require('../../src/electron/renderer/sessionRows');
+  const collect = now => {
+    const periods = { month: { sessions: { [`codex:${id}`]: {
+      client: 'codex', sessionId: id, totalTokens: 100,
+      models: { 'gpt-6.1-sol': 90, 'deepseek-v4.1-flash': 10 }
+    } } } };
+    applySessionMetadata(periods, home, { now, env: {}, codexDeps, readT3Meta: () => new Map(), resolveProjects: false });
+    return periods.month.sessions[`codex:${id}`];
+  };
+  const historical = collect(at + 60 * 60 * 1000);
+  assert.equal(historical.latestModel, 'deepseek-v4.1-flash');
+  assert.equal(historical.reasoningEffort, 'high');
+  assert.equal(sessionModelLabel(historical), 'deepseek-v4.1-flash +1');
+  assert.equal(bytesRead, 0, 'historical metadata does not invoke the context reader');
+  assert.equal(collect(at + 1000).latestModel, 'deepseek-v4.1-flash');
+  assert.equal(bytesRead, 1024 * 1024, 'cold context read keeps its existing one-MiB budget');
+  assert.equal(collect(at + 1000).latestModel, 'deepseek-v4.1-flash');
+  assert.equal(bytesRead, 1024 * 1024, 'unchanged context reuses the index');
+  fs.appendFileSync(transcript, line({ type: 'turn_context', payload: { model: 'newer', effort: 'xhigh' } }));
+  const recent = collect(at + 1000);
+  assert.equal(recent.latestModel, 'newer', 'observed recent configuration overrides the catalog');
+  assert.equal(recent.reasoningEffort, 'xhigh');
+  fs.appendFileSync(transcript, line({ type: 'turn_context', payload: {} }));
+  assert.equal(collect(at + 1000).latestModel, null, 'explicit unknown configuration cannot restore the catalog model');
 });
 
 test('the default T3 discovery covers every installed and dev state layout', () => {
@@ -505,4 +573,84 @@ maybe('an already named Codex history does not open the T3 database', () => {
   // Count work rather than elapsed time: this remains deterministic on slow CI.
   assert.equal(t3Opens, 0);
   assert.deepEqual(result, new Map(rows.map((row) => [row.id, { title: row.name }])));
+});
+
+// A Codex custom scan path is another Codex home (for example a per-task
+// CODEX_HOME). Tokscale already reads its rollouts for usage, so the title
+// lookup must read that home's thread database and transcripts too (#1462).
+maybe('custom Codex scan paths contribute titles and transcripts', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-custom-home-'));
+  const taskHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-task-home-'));
+  const inheritedHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-inherited-home-'));
+  tmpDirs.push(home, taskHome, inheritedHome);
+  const configuredId = 'rollout-2026-11-01T10-00-00-11111111-1111-4111-8111-111111111111';
+  const inheritedId = 'rollout-2026-11-02T10-00-00-22222222-2222-4222-8222-222222222222';
+  fs.copyFileSync(makeDb([{ id: '11111111-1111-4111-8111-111111111111', name: 'Task home title' }]), path.join(taskHome, 'state_5.sqlite'));
+  fs.copyFileSync(makeDb([{ id: '22222222-2222-4222-8222-222222222222', name: 'Inherited home title' }]), path.join(inheritedHome, 'state_5.sqlite'));
+  const transcriptDir = path.join(taskHome, 'sessions', '2026', '11', '01');
+  fs.mkdirSync(transcriptDir, { recursive: true });
+  fs.writeFileSync(path.join(transcriptDir, `${configuredId}.jsonl`), `${JSON.stringify({
+    timestamp: '2026-11-01T10:05:00.000Z', type: 'session_meta', payload: { id: '11111111-1111-4111-8111-111111111111' }
+  })}\n`);
+
+  const periods = { allTime: { sessions: {
+    [`codex:${configuredId}`]: { client: 'codex', sessionId: configuredId, totalTokens: 1 },
+    [`codex:${inheritedId}`]: { client: 'codex', sessionId: inheritedId, totalTokens: 1 }
+  } } };
+  require('../../src/shared/sessionMetadata').applySessionMetadata(periods, home, {
+    env: { TOKSCALE_EXTRA_DIRS: `claude:${home},codex:${inheritedHome}` },
+    customScanPaths: { codex: [taskHome] },
+    codexDeps: { sqlite },
+    readT3Meta: () => new Map(),
+    resolveProjects: false
+  });
+  const configured = periods.allTime.sessions[`codex:${configuredId}`];
+  assert.equal(configured.title, 'Task home title');
+  assert.equal(configured.nativeSessionId, '11111111-1111-4111-8111-111111111111');
+  assert.equal(configured.lastUsedAt, '2026-11-01T10:05:00.000Z');
+  assert.equal(periods.allTime.sessions[`codex:${inheritedId}`].title, 'Inherited home title');
+});
+
+maybe('primary Codex home fallback transcripts outrank additional homes', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-primary-home-'));
+  const taskHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-additional-home-'));
+  tmpDirs.push(home, taskHome);
+  const id = 'rollout-2026-11-01T10-00-00-44444444-4444-4444-8444-444444444444';
+  const entry = timestamp => `${JSON.stringify({
+    timestamp, type: 'session_meta', payload: { id: '44444444-4444-4444-8444-444444444444' }
+  })}\n`;
+  const primaryDir = path.join(home, '.codex', 'sessions', 'custom-layout');
+  const additionalDir = path.join(taskHome, 'sessions', '2026', '11', '01');
+  fs.mkdirSync(primaryDir, { recursive: true });
+  fs.mkdirSync(additionalDir, { recursive: true });
+  fs.writeFileSync(path.join(primaryDir, `${id}.jsonl`), entry('2026-11-01T10:05:00.000Z'));
+  fs.writeFileSync(path.join(additionalDir, `${id}.jsonl`), entry('2026-11-01T11:05:00.000Z'));
+
+  const periods = { allTime: { sessions: {
+    [`codex:${id}`]: { client: 'codex', sessionId: id, totalTokens: 1 }
+  } } };
+  require('../../src/shared/sessionMetadata').applySessionMetadata(periods, home, {
+    env: {},
+    customScanPaths: { codex: [taskHome] },
+    codexDeps: { sqlite },
+    readT3Meta: () => new Map(),
+    resolveProjects: false
+  });
+
+  assert.equal(periods.allTime.sessions[`codex:${id}`].lastUsedAt, '2026-11-01T10:05:00.000Z');
+});
+
+maybe('scoped homes ignore custom Codex scan paths', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-scoped-home-'));
+  const taskHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-scoped-task-'));
+  tmpDirs.push(home, taskHome);
+  const id = 'rollout-2026-11-03T10-00-00-33333333-3333-4333-8333-333333333333';
+  fs.copyFileSync(makeDb([{ id: '33333333-3333-4333-8333-333333333333', name: 'Host-only title' }]), path.join(taskHome, 'state_5.sqlite'));
+  const result = metadata.resolveSessionMetadata(new Set([id]), {
+    deps: { scopedHome: true, customScanPaths: { codex: [taskHome] }, codexDeps: { sqlite }, readT3Meta: () => new Map() },
+    home,
+    metadata: new Map(),
+    fileSessionMetadata: (_sessionId, _filePath, existing) => existing || {}
+  });
+  assert.equal(result.get(id), undefined);
 });

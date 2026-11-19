@@ -604,7 +604,11 @@ test('outgoing glyphs roll where they stood while a companion follows the layout
   el.rightAligned = true;
   const companion = element();
   let companionLeft = 300;
-  companion.getBoundingClientRect = () => ({ left: companionLeft, top: 0, width: 10, height: 20 });
+  companion.getBoundingClientRect = () => {
+    assert.ok(!el.children[1]?.children.some((glyph) => glyph.className?.includes('token-number-previous')),
+      'companion layout is measured before inserting outgoing layers');
+    return { left: companionLeft, top: 0, width: 10, height: 20 };
+  };
   el.nextElementSibling = companion;
   const settle = animationApi.beginRoll(el, '999', '1,000', true, () => { companionLeft = 320; });
   const wrapper = el.children[1];
@@ -761,7 +765,7 @@ test('a pushed animation preference settles the current headline before the next
   api.animateTotalNumber(el, 1000, 2000, 1000);
   api.animateRowNumber(row, 100, 200, 600);
   const start = source.indexOf('function setRendererSettings(');
-  const end = source.indexOf('\nfunction render()', start);
+  const end = source.indexOf('\nfunction render(', start);
   vm.runInNewContext(`${source.slice(start, end)}\nthis.setSettings = setRendererSettings;`, context);
   context.setSettings({ tokenNumberAnimation: 'roll' });
   assert.ok(api.headlineNumberIsAnimatingTo(2000), 'matching settings leave the roll running');

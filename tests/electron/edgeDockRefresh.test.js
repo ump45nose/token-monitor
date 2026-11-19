@@ -40,6 +40,8 @@ function fixture() {
     ownsUsageRuntime: () => Boolean(context.deviceRuntimeHandle),
     runManualDeviceRefresh,
     electronPresentationStats: (stats) => stats,
+    desktopQuotaStats: stats => stats,
+    syncPluginQuotaSurfaceDemand() {},
     edgeDockController: { isRunning: () => true },
     notchController: null,
     pushEdgeDockCells: (cells) => { context.dockStats = cells.stats; context.dockPeriods = cells.derivedPeriods; },
@@ -60,10 +62,13 @@ function fixture() {
     codexAccountsForRenderer: () => [],
     codexPresentationPendingAccountId: '',
     codexPresentationActiveAccountId: '',
-    edgeDockLiveRateSample: () => null,
+    edgeDockRateHistory: require('../../src/electron/renderer/tokenRatePresentation').createLiveTokenRateHistory(), edgeDockLiveRateSample: () => null,
     statsHistoryRevision: (stats) => stats?.historyRevision,
     injectLocalDeviceStatus: (stats) => stats,
+    getAccountPresentationSync: () => ({ notifyStats() {}, refresh: async () => {} }),
     getSyncContentRuntime: () => ({ notifyStats() {} }),
+    getLimitsHistoryStore: () => ({ record: (...args) => calls.push(['history', ...args]) }),
+    limitsHistoryController: null,
     migrateCodexAdditionalLimits() {},
     rendererSnapshots: { stamp: (_, stats) => stats },
     rendererStats: (stats) => stats,
@@ -264,6 +269,30 @@ test('App manual-button IPC uses the shared entry; other stats reads retain thei
   assert.match(main, /options\?\.force === true && options\?\.feedback === true \? refreshManualStats\(\) : fetchStats\(options\)/);
 });
 
+for (const first of ['App', 'native']) test(`${first} manual refresh starts one shared plugin refresh without waiting for quota`, async () => {
+  const { context, usage, limits } = fixture();
+  const quota = deferred(), logs = [];
+  let pluginCalls = 0, handler;
+  context.pluginRuntime = { refreshLimits: () => { pluginCalls++; return quota.promise; }, manager: { surfaceCatalog: () => [] }, publishStats() {} };
+  context.console.log = message => logs.push(message);
+  context.statsPushSource = null; context.latestStats = null;
+  context.ipcMain = { handle: (_name, fn) => { handler = fn; } };
+  const start = main.indexOf("  ipcMain.handle('stats:get',");
+  vm.runInNewContext(main.slice(start, main.indexOf("  ipcMain.handle('devices:delete',", start)), context);
+  const app = () => handler({}, { force: true, feedback: true });
+  const native = () => context.refreshStatsFromEdgeDock();
+  const pending = [first === 'App' ? app() : native()];
+  assert.equal(pluginCalls, 1, 'the initiating entry point refreshes plugin quotas');
+  pending.push(first === 'App' ? native() : app());
+  assert.equal(pluginCalls, 1, 'both actual entry points join one plugin refresh');
+  usage.resolve(true); await Promise.all(pending);
+  quota.reject(Error('synthetic quota failure')); await new Promise(setImmediate);
+  assert.ok(logs.some(message => message.includes('[plugins] Limits refresh failed: synthetic quota failure')));
+  context.pluginRuntime.refreshLimits = async () => { pluginCalls++; };
+  await native(); assert.equal(pluginCalls, 2, 'a later manual action can retry');
+  limits.resolve();
+});
+
 function clientFixture() {
   const fixtureResult = fixture();
   const { context } = fixtureResult;
@@ -333,6 +362,63 @@ test('runtime replacement without a mode change invalidates the dock manual sour
   await pending;
   assert.equal(context.dockStats, old);
   limits.resolve();
+});
+
+test('Settings gets completed local quotas before Host, iCloud, or cold Client stats', () => {
+  const { accountStatus } = require('../../src/electron/renderer/limits/accountSlotsPanel');
+  const accountIdentityApi = require('../../src/electron/renderer/accountIdentity');
+  const app = fs.readFileSync(require.resolve('../../src/electron/renderer/app.js'), 'utf8');
+  const scope = { provider: 'antigravity', account: null };
+  const reading = { provider: 'antigravity', status: 'ok' };
+  const result = { updatedAt: '2026-11-19T10:01:00.000Z', providers: [reading] };
+  const oldLimits = { updatedAt: result.updatedAt, providers: [] };
+
+  for (const hubMode of ['host', 'icloud', 'client']) {
+    const trace = [];
+    const publishedLimits = hubMode === 'icloud' ? { providers: [] } : oldLimits;
+    const previousStats = hubMode === 'client' ? null : { devices: [{ deviceId: 'here', limits: publishedLimits }] };
+    const state = { settings: { deviceId: 'here' }, stats: previousStats };
+    const renderer = vm.createContext({
+      state, accountIdentityApi, settingsLocalLimits: null, limitProbes: [],
+      localDeviceLimitsProviders: () => accountIdentityApi.localDeviceLimitsProviders(state.stats, 'here'),
+      isSettingsSurfaceVisible: () => true, preserveSettingsPanelScroll: paint => paint(),
+      limitWindowsView: { syncLimitRefreshButtons() {} },
+      accountSlotPanels: new Map(), automaticAccountPanels: new Map(), legacyAccountOwners: {
+        antigravity: { refreshReadings() {
+          trace.push(accountStatus({ enabled: true }, renderer.localProviderStatuses('antigravity')[0],
+            true, renderer.limitProbes.some(probe => probe.provider === 'antigravity')));
+        } }
+      }
+    });
+    vm.runInContext(app.slice(app.indexOf('function settingsLocalDeviceLimitsProviders('), app.indexOf('function renderWorkbuddyStatus(')), renderer);
+    vm.runInContext(app.slice(app.indexOf('function setLimitProbes('), app.indexOf('let limitProbesPushed')), renderer);
+    const microtasks = [];
+    const mainContext = vm.createContext({
+      settings: { deviceId: 'here', hubMode }, edgeDockController: null,
+      mainWindow: { isDestroyed: () => false, webContents: { send(_channel, { probes, local }) {
+        renderer.setLimitProbes(probes, local);
+      } } },
+      queueMicrotask: (callback) => microtasks.push(callback)
+    });
+    vm.runInContext(main.slice(main.indexOf('let limitProbes = [];'), main.indexOf('let copilotLoginController')), mainContext);
+    mainContext.publishLimitProbes([scope]);
+    mainContext.updateSettingsLocalLimits(result);
+    mainContext.publishLimitProbes([]);
+    microtasks.shift()();
+    assert.deepEqual(trace, ['checking', 'connected'], hubMode);
+    assert.deepEqual(renderer.localProviderStatuses('antigravity'), [reading], hubMode);
+    assert.equal(state.stats, previousStats, 'the usage/sync snapshot has not arrived');
+
+    state.stats = { devices: [{ deviceId: 'here', limits: { ...result, providers: [{ ...reading, stale: true }] } }] };
+    assert.equal(renderer.localProviderStatuses('antigravity')[0].stale, true, 'return to published presentation once it catches up');
+    mainContext.clearSettingsLimitState();
+    state.stats = previousStats;
+    mainContext.publishLimitProbes([scope]);
+    mainContext.updateSettingsLocalLimits({ ...result, providers: [] });
+    mainContext.publishLimitProbes([]);
+    microtasks.shift()();
+    assert.deepEqual(trace.slice(-2), ['checking', 'unavailable'], 'a finished check with no reading remains unavailable');
+  }
 });
 
 for (const entry of ['App', 'Edge Dock']) {
@@ -442,7 +528,9 @@ test('manual refresh reconciles older-only usage in Month, All Time and History'
 
 test('Tray-menu refresh retains its existing full usage request', async () => {
   const { context, usage, limits, calls } = fixture();
+  let pluginCalls = 0;
   Object.assign(context, {
+    pluginRuntime: { refreshLimits: async () => { pluginCalls++; } },
     trayRefreshInFlight: false,
     captureMacWidgetProducerOwner: () => null,
     runTrayMenuAction: ({ action }) => action(),
@@ -453,6 +541,7 @@ test('Tray-menu refresh retains its existing full usage request', async () => {
   const trayRefresh = main.slice(main.indexOf('async function refreshFromTray'), main.indexOf('function setTrayContentFromMenu'));
   vm.runInNewContext(trayRefresh, context);
   const request = context.refreshFromTray();
+  assert.equal(pluginCalls, 1, 'the Tray menu also refreshes desktop-local plugin quotas');
   assert.equal(JSON.stringify(calls), JSON.stringify([
     ['limits', { all: true }, 'manual'],
     ['usage', 'manual', { forceHistory: false, forceSelfSync: false }]

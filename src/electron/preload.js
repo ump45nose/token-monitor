@@ -41,6 +41,7 @@ contextBridge.exposeInMainWorld('tokenMonitor', {
   getStats: (options) => ipcRenderer.invoke('stats:get', options),
   deleteDevice: (deviceId) => ipcRenderer.invoke('devices:delete', deviceId),
   getAllTimeSessions: (snapshotId) => ipcRenderer.invoke('stats:allTimeSessions', snapshotId),
+  getArchivedSessionCount: () => ipcRenderer.invoke('stats:archivedSessionCount'),
   getSessionDetail: (args) => ipcRenderer.invoke('session:getDetail', args),
   getStreamStatus: () => ipcRenderer.invoke('stream:status'),
   getServiceStatus: (options) => ipcRenderer.invoke('serviceStatus:get', options),
@@ -177,6 +178,7 @@ contextBridge.exposeInMainWorld('tokenMonitor', {
   expandFloatingBubble: () => ipcRenderer.invoke('floatingBubble:expand'),
   moveFloatingBubble: (delta) => ipcRenderer.invoke('floatingBubble:move', delta),
   signalContentReady: () => ipcRenderer.send('window:contentReady'),
+  signalAppearanceReady: () => ipcRenderer.send('window:appearanceReady'),
   setViewState: (patch) => ipcRenderer.send('window:viewState', patch),
   peekFloatingBubble: () => ipcRenderer.invoke('floatingBubble:peek'),
   collapseFloatingBubbleIfIdle: () => ipcRenderer.invoke('floatingBubble:collapseIfIdle'),
@@ -205,10 +207,26 @@ contextBridge.exposeInMainWorld('tokenMonitor', {
     setAccountEnabled: (id, enabled) => ipcRenderer.invoke('claude:setAccountEnabled', id, enabled)
   },
   limits: {
+    openHistory: (key, rect, interactive = false, requestId) => ipcRenderer.invoke('limitsHistory:open', { key, rect, interactive, requestId }),
+    enterHistory: key => ipcRenderer.send('limitsHistory:enter', key),
+    leaveHistory: key => ipcRenderer.send('limitsHistory:leave', key),
+    closeHistory: (requestId = null) => ipcRenderer.send('limitsHistory:close', requestId),
+    onHistoryState: callback => {
+      const listener = (_event, open, key) => callback(open, key);
+      ipcRenderer.on('limitsHistory:state', listener);
+      return () => ipcRenderer.removeListener('limitsHistory:state', listener);
+    },
+    accountSlots: Object.fromEntries(['list', 'add', 'replace', 'rename', 'setEnabled', 'remove', 'move', 'presentation'].map(operation => [operation, (...args) => ipcRenderer.invoke(`limits:accountSlots:${operation}`, ...args)])),
     saveCredential: (providerId, values) => ipcRenderer.invoke('limits:saveCredential', providerId, values),
     listOrganizationChoices: (providerId) => ipcRenderer.invoke('limits:listOrganizationChoices', providerId),
     clearCredential: (providerId) => ipcRenderer.invoke('limits:clearCredential', providerId),
-    refresh: (providerId) => ipcRenderer.invoke('limits:refresh', providerId)
+    refresh: (providerId, account) => ipcRenderer.invoke('limits:refresh', providerId, account),
+    probes: () => ipcRenderer.invoke('limits:probes'),
+    onProbes: callback => {
+      const listener = (_event, probes) => callback(probes);
+      ipcRenderer.on('limits:probes', listener);
+      return () => ipcRenderer.removeListener('limits:probes', listener);
+    }
   },
   opencode: {
     saveCookie: (cookie) => ipcRenderer.invoke('opencode:saveCookie', cookie),
@@ -223,12 +241,10 @@ contextBridge.exposeInMainWorld('tokenMonitor', {
     setProfileEnabled: (name, enabled) => ipcRenderer.invoke('opencode:setProfileEnabled', name, enabled),
     setAmbientEnabled: (enabled) => ipcRenderer.invoke('opencode:setAmbientEnabled', enabled)
   },
-  openrouter: {
-    getProfiles: () => ipcRenderer.invoke('openrouter:getProfiles'),
-    saveProfile: (name, apiKey) => ipcRenderer.invoke('openrouter:saveProfile', name, apiKey),
-    deleteProfile: (name) => ipcRenderer.invoke('openrouter:deleteProfile', name),
-    renameProfile: (oldName, newName) => ipcRenderer.invoke('openrouter:renameProfile', oldName, newName),
-    setProfileEnabled: (name, enabled) => ipcRenderer.invoke('openrouter:setProfileEnabled', name, enabled)
+  minimax: {
+    getKeys: () => ipcRenderer.invoke('minimax:getKeys'),
+    addKey: (key) => ipcRenderer.invoke('minimax:addKey', key),
+    removeKey: (id) => ipcRenderer.invoke('minimax:removeKey', id)
   },
   thirdparty: {
     getProfiles: () => ipcRenderer.invoke('thirdparty:getProfiles'),
@@ -258,6 +274,10 @@ contextBridge.exposeInMainWorld('tokenMonitor', {
     }
   },
   copilot: {
+    getAccounts: () => ipcRenderer.invoke('copilot:getAccounts'),
+    addAccount: (token) => ipcRenderer.invoke('copilot:addAccount', token),
+    removeAccount: (id) => ipcRenderer.invoke('copilot:removeAccount', id),
+    setEnabled: (id, enabled) => ipcRenderer.invoke('copilot:setEnabled', id, enabled),
     signIn: (options = {}) => ipcRenderer.invoke('copilot:signIn', options),
     cancelSignIn: (options = {}) => ipcRenderer.invoke('copilot:cancelSignIn', options),
     onLoginStatus: (callback) => {
@@ -269,6 +289,9 @@ contextBridge.exposeInMainWorld('tokenMonitor', {
   // Plugin management and the views this window draws (Home, tray bitmap).
   // Trust and installation run in main; enabled author UI executes in this page.
   plugins: {
+    limitsDemand: value => ipcRenderer.invoke('plugins:limitsDemand', value),
+    forgetCredentials: id => ipcRenderer.invoke('plugins:forgetCredentials', id),
+
     getSettings: id => pluginSettingsResult(ipcRenderer.invoke('plugins:getSettings', id)),
     updateSettings: (id, input) => pluginSettingsResult(ipcRenderer.invoke('plugins:updateSettings', id, input)),
     list: () => ipcRenderer.invoke('plugins:list'),
@@ -279,10 +302,12 @@ contextBridge.exposeInMainWorld('tokenMonitor', {
     openFolder: () => ipcRenderer.invoke('plugins:openFolder'),
     openPage: ref => ipcRenderer.invoke('plugins:openPage', ref),
     catalog: () => ipcRenderer.invoke('plugins:catalog'),
+    recover: id => ipcRenderer.invoke('plugins:recover', id),
     discoverCatalog: force => ipcRenderer.invoke('plugins:discoverCatalog', force === true),
     catalogDetails: (source, id) => ipcRenderer.invoke('plugins:catalogDetails', source, id),
     closeCatalogDetails: () => ipcRenderer.invoke('plugins:closeCatalogDetails'),
     catalogReadmeImage: (documentId, index) => ipcRenderer.invoke('plugins:catalogReadmeImage', documentId, index),
+    configureUpdates: (id, value) => ipcRenderer.invoke('plugins:configureUpdates', id, value),
     catalogPreview: (source, id, version) => ipcRenderer.invoke('plugins:catalogPreview', source, id, version),
     addSource: input => ipcRenderer.invoke('plugins:addSource', input),
     refreshSource: id => ipcRenderer.invoke('plugins:refreshSource', id),

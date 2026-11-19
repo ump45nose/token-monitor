@@ -1,6 +1,29 @@
+import AppKit
 import XCTest
 
 final class WidgetSnapshotDecodingTests: XCTestCase {
+    func testGeminiArtworkRendersItsCenterInAppKit() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let url = root.appendingPathComponent("assets/icons/gemini.svg")
+        // Use the Widget's SVG normalization before asking AppKit to rasterize.
+        let source = try String(contentsOf: url, encoding: .utf8)
+            .replacingOccurrences(
+                of: #"(width|height)=["']1em["']"#,
+                with: #"$1="24""#,
+                options: .regularExpression
+            )
+            .replacingOccurrences(of: "currentColor", with: "#000000", options: .caseInsensitive)
+        let image = try XCTUnwrap(NSImage(data: Data(source.utf8)))
+        let raster = try XCTUnwrap(image.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        let bitmap = NSBitmapImageRep(cgImage: raster)
+        // Compact arc flags used to leave only a small fragment at the right
+        // edge. The Gemini star must include an opaque center.
+        let center = try XCTUnwrap(bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2))
+        XCTAssertGreaterThan(center.alphaComponent, 0.9)
+    }
+
     func testTrendChangeSkipsLeadingZeroBuckets() {
         XCTAssertEqual(
             WidgetTrendChange.label(for: [
@@ -355,6 +378,22 @@ final class WidgetSnapshotDecodingTests: XCTestCase {
         XCTAssertEqual(palette.ink(for: "unlisted"), .hex("#6ab4f0"))
     }
 
+    func testGeminiClientAndModelUseTheirOwnArtworkWithoutRenamingTools() throws {
+        let snapshot = try decode("""
+        {"schemaVersion":10,"generatedAt":"2026-07-17T09:00:00Z",
+         "periods":{"day":{"tools":[{"id":"gemini","displayName":"Gemini CLI","totalTokens":29,"costUsd":0,"sharePercent":100}]}},
+         "vendors":{"gemini":{"icon":"gemini-cli","ink":true,"fullColor":true,"modelIcon":"gemini","modelColor":"#4285f4"}},
+         "status":{"isStale":false}}
+        """)
+        XCTAssertEqual(snapshot.tools.first?.id, "gemini")
+        let palette = WidgetVendorPalette(styles: snapshot.vendors)
+        XCTAssertEqual(palette.iconName(for: "gemini"), "gemini-cli")
+        XCTAssertEqual(palette.iconName(for: "gemini", model: true), "gemini")
+        XCTAssertEqual(palette.ink(for: "gemini"), .adaptive)
+        XCTAssertEqual(palette.ink(for: "gemini", model: true), .hex("#4285f4"))
+        XCTAssertEqual(snapshot.vendors["gemini"]?.fullColor, true)
+    }
+
     func testSnapshotWithoutPaletteOrToolNamesStillDecodes() throws {
         // What an app build from before the vendor palette writes: same schema,
         // no `vendors`, no tool displayName. It must render, not wait for data.
@@ -437,6 +476,53 @@ final class WidgetSnapshotDecodingTests: XCTestCase {
             )),
             "63.00 credits left"
         )
+    }
+
+    func testWonBalancesAndQuotaWindowsUseWholeWon() {
+        for amount in [1380.25, 0] {
+            let expected = amount == 0 ? "₩0" : "₩1380"
+            let balance = WidgetQuotaProvider(
+                instanceId: "deepseek-single",
+                provider: "deepseek",
+                status: "ok",
+                updatedAt: nil,
+                windows: [],
+                balance: WidgetQuotaBalance(amount: amount, currency: "KRW")
+            )
+            let credits = WidgetLimitWindow(
+                kind: "billing", remainingPercent: nil, resetsAt: nil,
+                metric: "credits", showMeter: false, remaining: amount, currency: "KRW"
+            )
+            let spend = WidgetLimitWindow(
+                kind: "billing", remainingPercent: nil, resetsAt: nil,
+                metric: "spend", showMeter: false, used: amount, currency: "krw"
+            )
+
+            XCTAssertEqual(WidgetFormat.quotaValue(balance), "\(expected) left")
+            XCTAssertEqual(WidgetFormat.windowValue(credits), expected)
+            XCTAssertEqual(WidgetFormat.windowValue(spend), expected)
+        }
+    }
+
+    func testCommonCurrenciesFormatWidgetCostsAndQuotaAmounts() {
+        for (code, symbol, decimals) in [
+            ("AUD", "A$", 2), ("BRL", "R$", 2), ("CAD", "CA$", 2),
+            ("CHF", "CHF ", 2), ("EUR", "€", 2), ("GBP", "£", 2),
+            ("INR", "₹", 2), ("JPY", "JP¥", 0), ("SGD", "S$", 2)
+        ] {
+            let presentation = WidgetPresentation(
+                currencyCode: code, currencySymbol: symbol, currencyRate: 1,
+                numberStyle: "compact", compactTokenUnits: "western",
+                showCost: true, locale: "en", theme: "system"
+            )
+            let expected = symbol + (decimals == 0 ? "12" : "12.25")
+            let window = WidgetLimitWindow(
+                kind: "billing", remainingPercent: nil, resetsAt: nil,
+                metric: "credits", showMeter: false, remaining: 12.25, currency: code
+            )
+            XCTAssertEqual(WidgetFormat.cost(12.25, presentation: presentation), expected)
+            XCTAssertEqual(WidgetFormat.windowValue(window), expected)
+        }
     }
 
     func testQuotaWindowValuePreservesCurrencyAndSpendSemantics() {

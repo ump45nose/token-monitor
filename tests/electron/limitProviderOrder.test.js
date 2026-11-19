@@ -51,6 +51,7 @@ test('default provider order follows tracked tools, named services, then third-p
     'deepseek',
     'devin',
     'minimax',
+    'mistral',
     'typesafe',
     'openrouter',
     'volcengine',
@@ -60,6 +61,8 @@ test('default provider order follows tracked tools, named services, then third-p
     'stepfun',
     'notion',
     'manus',
+    'hark',
+    'opendesign',
     'thirdparty'
   ]);
 });
@@ -123,8 +126,7 @@ test('provider registration and account layout order follows the catalog', () =>
     assert.deepEqual(ids, canonical.filter((id) => ids.includes(id)), label);
   };
   for (const [file, names, indent] of [
-    ['src/electron/renderer/app.js', ['LIMIT_PROVIDER_ACCOUNT_NODES', 'externalLimitAccountConfig'], '  '],
-    ['src/electron/renderer/limits/providerPresentation.js', ['PROVIDER_SOURCE_LABELS', 'CAPABILITY_TAGS'], '    ']
+    ['src/electron/renderer/app.js', ['LIMIT_PROVIDER_ACCOUNT_NODES'], '  ']
   ]) {
     const source = read(file);
     for (const name of names) {

@@ -27,7 +27,15 @@ installInProcessWatchHost(test);
 
 function freshCollector() {
   delete require.cache[collectorPath];
-  return require(collectorPath);
+  const collector = require(collectorPath);
+  return {
+    ...collector,
+    // These tests count usage/self-sync spawns. Catalog scheduling is covered
+    // separately, and must not consume their synthetic source-event clocks.
+    startCollector: options => collector.startCollector({
+      ...options, pricingCatalogTimers: { setTimeout: () => 1, clearTimeout() {} }
+    })
+  };
 }
 
 // realpath the base: a real os.homedir() is already canonical, but os.tmpdir()
@@ -2247,8 +2255,8 @@ test('watchIgnoreMatcher keeps a recursive source rooted on a bounded root', () 
 
     assert.equal(ignored(root), false);
     assert.equal(ignored(path.join(root, 'state.db')), false);
-    assert.equal(ignored(path.join(root, 'session.jsonl')), false);
-    assert.equal(ignored(path.join(root, 'nested', 'task.json')), false);
+    assert.equal(ignored(path.join(root, 'session.messages.json')), false);
+    assert.equal(ignored(path.join(root, 'nested', 'task.messages.json')), false);
   } finally {
     os.homedir = originalHomedir;
     delete require.cache[collectorPath];
@@ -2444,9 +2452,8 @@ test('watchPathsForClients keeps bounded tool roots but leaves Kiro IDE globalSt
     assert.ok(dirs.includes(path.join(tmp, 'AppData', 'Roaming', 'Code', 'User', 'globalStorage', 'kilocode.kilo-code', 'tasks')));
     assert.ok(dirs.includes(path.join(tmp, '.local', 'share', 'mimocode')));
     assert.ok(dirs.includes(path.join(tmp, '.zcode', 'projects')));
-    // Kiro sessions and the bounded kiro-cli database keep seconds-level
-    // refresh. The unbounded IDE globalStorage source remains present and
-    // collectable, but never enters chokidar's native or 2-second polling tree.
+    // Kiro sessions and CLI keep live updates. GlobalStorage remains covered
+    // by interval/manual collection without a recursive watcher.
     assert.ok(dirs.includes(path.join(tmp, '.kiro', 'sessions')));
     assert.ok(!dirs.includes(path.join(tmp, 'Library', 'Application Support', 'Kiro', 'User', 'globalStorage', 'kiro.kiroagent')));
     assert.ok(dirs.includes(path.join(tmp, '.local', 'share', 'kiro-cli')));
@@ -2620,8 +2627,8 @@ test('watchIgnoreMatcher honors HERMES_HOME and is absent when Hermes is not tra
     assert.equal(ignored(path.join(hermesHome, 'state.db-wal')), false);
     assert.equal(ignored(path.join(hermesHome, 'logs')), false);
     assert.equal(ignored(path.join(hermesHome, 'logs', 'agent.log')), false);
-    // No Hermes tracked, no matcher, so other watchers run unchanged.
-    assert.equal(watchIgnoreMatcher('claude,codex'), undefined);
+    // No Hermes tracked, so its policy does not add a matcher to Codex.
+    assert.equal(watchIgnoreMatcher('codex'), undefined);
   } finally {
     os.homedir = originalHomedir;
     if (previousHermesHome === undefined) delete process.env.HERMES_HOME;
@@ -3337,18 +3344,15 @@ test('smart collection uses native watching and skips idle intervals after start
 // idle time rewrote it 0 times in 40s.
 test('self-watch db-shm events are ignored for every client whose scan recreates the sidecar', () => {
   const { isSelfWatchSqliteSidecarEvent } = freshCollector();
-  const qoderRoot = path.join(os.tmpdir(), 'QoderCN', 'db');
   const zcodeRoot = path.join(os.tmpdir(), 'zcode', 'cli', 'db');
   const antigravityRoot = path.join(os.tmpdir(), '.gemini', 'antigravity');
   const antigravityConversation = path.join(antigravityRoot, 'conversations');
   const cherryRoot = path.join(os.tmpdir(), 'CherryStudio', 'Data');
-  const roots = { antigravity: [antigravityRoot], cherrystudio: [cherryRoot], qodercn: [qoderRoot], zcode: [zcodeRoot] };
+  const roots = { antigravity: [antigravityRoot], cherrystudio: [cherryRoot], zcode: [zcodeRoot] };
 
-  // Each client keeps its own database basename: Qoder CN names it local.db,
-  // ZCode names it db.sqlite, Antigravity names one per conversation, below its
-  // watch root.
+  // Each SQLite client keeps its own database basename; Antigravity names
+  // one per conversation below its watch root.
   for (const [root, base] of [
-    [qoderRoot, 'local.db'],
     [zcodeRoot, 'db.sqlite'],
     [antigravityConversation, '1f17ba78-fe78-4ed6-9f69-07387625fdad.db'],
     [cherryRoot, 'cherrystudio.sqlite']
@@ -3371,16 +3375,6 @@ test('self-watch db-shm events are ignored for every client whose scan recreates
   for (const name of ['db.sqlite-shm-journal', 'db.sqlite-wal', 'db.sqlite', 'notes-shm', 'db.sqlite-shm.bak']) {
     assert.equal(isSelfWatchSqliteSidecarEvent(path.join(zcodeRoot, name), zcodeOnly), false, name);
   }
-});
-
-// A client is added to that list only on measured evidence, so a scan that does
-// not rewrite its sidecar must keep waking the collector on shm events.
-test('a SQLite client whose scan does not recreate its sidecar still watches db-shm', () => {
-  const { isSelfWatchSqliteSidecarEvent } = freshCollector();
-  const mimoRoot = path.join(os.tmpdir(), 'mimocode');
-  const roots = { mimo: [mimoRoot] };
-
-  assert.equal(isSelfWatchSqliteSidecarEvent(path.join(mimoRoot, 'mimocode.db-shm'), roots), false);
 });
 
 // The unit test above proves the predicate; this proves the consequence the bug
@@ -3471,14 +3465,13 @@ for (const client of ['zcode', 'cherrystudio', 'goose']) {
   });
 }
 
-test('collector does not reuse a persisted anchor after the Qoder CN DB path changes', async () => {
+test('collector does not reuse a persisted anchor with a retired Qoder CN database source', async () => {
   const tmp = withTmpHome([]);
   const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
-  const originalQoderCnDbPath = process.env.TOKEN_MONITOR_QODER_CN_DB_PATH;
+  const previousDbOverride = process.env.TOKEN_MONITOR_QODER_CN_DB_PATH;
   const oldDbPath = path.join(tmp, 'old', 'local.db');
-  const newDbPath = path.join(tmp, 'new', 'local.db');
   process.env.TOKEN_MONITOR_SHARED_DIR = tmp;
-  process.env.TOKEN_MONITOR_QODER_CN_DB_PATH = newDbPath;
+  process.env.TOKEN_MONITOR_QODER_CN_DB_PATH = oldDbPath;
 
   const initialCollector = freshCollector();
   const oldQoderCnPeriod = emptyPeriod();
@@ -3486,10 +3479,12 @@ test('collector does not reuse a persisted anchor after the Qoder CN DB path cha
   oldQoderCnPeriod.clients = { qodercn: 9 };
   fs.writeFileSync(path.join(tmp, 'collector-anchor.json'), JSON.stringify({
     dateKey: initialCollector.localTodayKey(),
+    calendarKey: initialCollector.collectionCalendarKey(),
+    sessionIdentityVersion: 2,
     today: emptyPeriod(),
     month: oldQoderCnPeriod,
     allTime: oldQoderCnPeriod,
-    configFingerprint: initialCollector.configFingerprint('claude,qodercn', '2024-01-01', true, oldDbPath, initialCollector.qoderCnProjectsDirForClients('claude,qodercn')),
+    configFingerprint: `claude,qodercn|2024-01-01|projects:on|qodercn:${path.resolve(oldDbPath)}|qodercnProjects:${path.resolve(initialCollector.clientSourceRoots('qodercn').qodercn.find(root => root.id === 'qodercn-projects').dir)}|pricing:${initialCollector.pricingFingerprint()}`,
     fullScanAt: new Date(Date.now() - 5 * 60 * 1000).toISOString()
   }));
 
@@ -3519,8 +3514,8 @@ test('collector does not reuse a persisted anchor after the Qoder CN DB path cha
     if (handle) handle.stop();
     if (originalSharedDir === undefined) delete process.env.TOKEN_MONITOR_SHARED_DIR;
     else process.env.TOKEN_MONITOR_SHARED_DIR = originalSharedDir;
-    if (originalQoderCnDbPath === undefined) delete process.env.TOKEN_MONITOR_QODER_CN_DB_PATH;
-    else process.env.TOKEN_MONITOR_QODER_CN_DB_PATH = originalQoderCnDbPath;
+    if (previousDbOverride === undefined) delete process.env.TOKEN_MONITOR_QODER_CN_DB_PATH;
+    else process.env.TOKEN_MONITOR_QODER_CN_DB_PATH = previousDbOverride;
     delete require.cache[collectorPath];
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -3572,19 +3567,27 @@ test('smart collection coalesces watch events into one targeted interval tick', 
       onUpdate: (_summary, reason) => updates.push(reason)
     });
 
-    await waitForCondition(() => updates.length === 1);
+    // Cursor publishes its offline cache independently of the local startup.
+    // Settle both the initial and post-sync cache reads before measuring the
+    // activity batch; each complete Cursor read scans three periods.
+    await waitForCondition(() => calls.filter(args => args[args.indexOf('--client') + 1] === 'cursor').length === 6);
+    await new Promise(resolve => setImmediate(resolve));
+    await handle.whenIdle();
+    const startupCalls = calls.length;
+    const startupUpdates = updates.length;
     watchHandler('change', path.join(tmp, '.claude', 'projects', 'one.jsonl'));
     watchHandler('change', path.join(tmp, '.claude', 'projects', 'two.jsonl'));
     watchHandler('change', path.join(tmp, '.claude', 'projects', 'three.jsonl'));
     await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(calls.length, 3, 'watch events never scan immediately in smart mode');
+    assert.equal(calls.length, startupCalls, 'watch events never scan immediately in smart mode');
 
-    await waitForCondition(() => updates.length === 2);
-    assert.equal(calls.length, 5, 'one targeted tick acknowledges the event batch');
-    assert.equal(calls[3][calls[3].indexOf('--client') + 1], 'claude,cursor');
-    assert.equal(calls[4][calls[4].indexOf('--client') + 1], 'claude,codex,cursor');
+    await waitForCondition(() => updates.length === startupUpdates + 1);
+    const activityCalls = calls.slice(startupCalls);
+    assert.equal(activityCalls.length, 2, 'one targeted tick acknowledges the event batch');
+    assert.equal(activityCalls[0][activityCalls[0].indexOf('--client') + 1], 'claude');
+    assert.equal(activityCalls[1][activityCalls[1].indexOf('--client') + 1], 'claude,codex');
     await new Promise((resolve) => setTimeout(resolve, 100));
-    assert.equal(calls.length, 5, 'the acknowledged batch does not repeat');
+    assert.equal(calls.length, startupCalls + 2, 'the acknowledged batch does not repeat');
   } finally {
     if (handle) handle.stop();
     cursorAuth.runCursorSync = originalRunCursorSync;
@@ -3733,17 +3736,22 @@ test('smart collection retries a failed activity scan on the next interval', asy
       onError: (error) => errors.push(error.message)
     });
 
-    await waitForCondition(() => updates.length === 1);
+    await waitForCondition(() => calls.filter(args => args[args.indexOf('--client') + 1] === 'cursor').length === 6);
+    await new Promise(resolve => setImmediate(resolve));
+    await handle.whenIdle();
+    const startupCalls = calls.length;
+    const startupUpdates = updates.length;
     failNext = true;
     watchHandler('change', path.join(tmp, '.claude', 'projects', 'session.jsonl'));
     await waitForCondition(() => errors.length === 1);
-    await waitForCondition(() => updates.length === 2);
-    assert.equal(calls.length, 5, 'failed and successful activity attempts each spawn once');
-    assert.equal(calls[3][calls[3].indexOf('--client') + 1], 'claude,cursor');
+    await waitForCondition(() => updates.length === startupUpdates + 1);
+    const activityCalls = calls.slice(startupCalls);
+    assert.equal(activityCalls.length, 2, 'failed and successful activity attempts each spawn once');
+    assert.equal(activityCalls[0][activityCalls[0].indexOf('--client') + 1], 'claude');
     assert.equal(
-      calls[4][calls[4].indexOf('--client') + 1],
-      'claude,codex,cursor',
-      'a failed targeted scan retries all clients instead of acknowledging partial data'
+      activityCalls[1][activityCalls[1].indexOf('--client') + 1],
+      'claude,codex',
+      'a failed targeted scan retries all local clients instead of acknowledging partial data'
     );
   } finally {
     if (handle) handle.stop();
@@ -4479,6 +4487,7 @@ test('hourly smart reconciliation refreshes WSL-only usage without a host event'
       limitsEnabled: false,
       historyEnabled: false,
       probeWslState: () => 'ok',
+      wslScanEnabled: true,
       collectWslUsage: async () => {
         wslCalls += 1;
         return { bundle: wslBundleWith('gemini', wslCalls === 1 ? 5 : 9), detected: ['gemini'] };
@@ -4579,6 +4588,64 @@ test('hourly smart reconciliation starts watching a client directory created aft
     delete require.cache[collectorPath];
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+// A root becomes a Codex home when Codex first writes there, usually between
+// hourly full scans. The Today tick that write triggers must swap in the home
+// policy, or idle title lookups re-trigger collection until the next full scan.
+test('a custom Codex root that becomes a Codex home rebuilds the watcher on a Today tick', async (t) => {
+  const tmp = withTmpHome([path.join('.codex', 'sessions')]);
+  const customHome = path.join(tmp, 'task', 'codex-home');
+  fs.mkdirSync(customHome, { recursive: true });
+  const originalHomedir = os.homedir;
+  const originalCodexHome = process.env.CODEX_HOME;
+  const chokidar = require('chokidar');
+  const originalWatch = chokidar.watch;
+  let handle;
+  t.after(() => {
+    handle?.stop();
+    chokidar.watch = originalWatch;
+    os.homedir = originalHomedir;
+    if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = originalCodexHome;
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+  os.homedir = () => tmp;
+  delete process.env.CODEX_HOME;
+  const ignoredByWatcher = [];
+  let watchHandler;
+  chokidar.watch = (_dirs, options) => {
+    ignoredByWatcher.push(options.ignored);
+    const watcher = {
+      on(event, callback) { if (event === 'all') watchHandler = callback; return watcher; },
+      close() {}
+    };
+    return watcher;
+  };
+  const calls = [];
+  const updates = [];
+  const { startCollector } = freshCollector();
+  handle = startCollector({
+    clients: 'codex', customScanPaths: { codex: [customHome] },
+    allTimeSince: '2024-01-01', commandTimeoutMs: 1000,
+    deviceId: 'fixture-device', agentVersion: 'fixture', intervalMs: 60 * 60 * 1000,
+    watchEnabled: true, watchUsePolling: false, watchTriggersCollection: true, watchDebounceMs: 10,
+    historyEnabled: false, dailyHistoryArchiveEnabled: false, anchorPersistenceEnabled: false,
+    codexLocalUsageEnabled: false, wslScanEnabled: false,
+    runTokscale: async (input) => { calls.push(input); return { entries: [] }; },
+    onUpdate: (summary) => updates.push(summary)
+  });
+  const sidecar = path.join(customHome, 'state_5.sqlite-shm');
+  await waitForCondition(() => updates.length === 1 && ignoredByWatcher.length === 1);
+  assert.equal(ignoredByWatcher[0]?.(sidecar) ?? false, false, 'an empty custom root is not a Codex home yet');
+
+  fs.writeFileSync(path.join(customHome, 'state_5.sqlite'), '');
+  watchHandler('add', path.join(customHome, 'state_5.sqlite'));
+  await waitForCondition(() => updates.length === 2 && ignoredByWatcher.length === 2);
+  assert.deepEqual(calls.at(-1).flags, ['--today'], 'the rebuild happens on the anchored Today tick');
+  assert.equal(ignoredByWatcher[1](sidecar), true, 'the rebuilt watcher ignores the home catalog sidecars');
+  assert.equal(ignoredByWatcher[1](path.join(customHome, 'sessions', 'rollout.jsonl')), false);
 });
 
 test('smart collection lets a successful manual refresh acknowledge existing activity', async () => {
@@ -5002,6 +5069,56 @@ test('custom Tokscale scan paths stay visible and use recursive extra-root watch
     assert.equal(copilotIgnored(path.join(copilotCustom, 'nested', 'session.jsonl')), false);
   } finally {
     os.homedir = originalHomedir;
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// Title lookups read a custom Codex home's catalog every tick. While Codex is
+// idle that read recreates the -wal/-shm sidecars, so watching them would
+// re-trigger the collector forever. A custom home keeps the built-in contract.
+test('a custom Codex home watches only its transcript trees', () => {
+  const tmp = withTmpHome([path.join('.codex', 'sessions')]);
+  const originalHomedir = os.homedir;
+  const originalCodexHome = process.env.CODEX_HOME;
+  delete process.env.CODEX_HOME;
+  os.homedir = () => tmp;
+  try {
+    const { watchIgnoreMatcher } = freshCollector();
+    const taskHome = path.join(tmp, 'task', 'codex-home');
+    fs.mkdirSync(path.join(taskHome, 'sessions'), { recursive: true });
+    fs.writeFileSync(path.join(taskHome, 'state_5.sqlite'), '');
+    const catalogOnly = path.join(tmp, 'fresh', 'codex-home');
+    fs.mkdirSync(catalogOnly, { recursive: true });
+    fs.writeFileSync(path.join(catalogOnly, 'state_5.sqlite'), '');
+    const ignored = watchIgnoreMatcher('codex', { customScanPaths: { codex: [taskHome, catalogOnly] } });
+
+    assert.equal(ignored(taskHome), false, 'the root itself is always kept');
+    assert.equal(ignored(path.join(taskHome, 'sessions')), false);
+    assert.equal(ignored(path.join(taskHome, 'sessions', '2026', '11', '01', 'rollout-x.jsonl')), false);
+    assert.equal(ignored(path.join(taskHome, 'archived_sessions', 'rollout-y.jsonl')), false);
+    assert.equal(ignored(path.join(taskHome, 'sessions', 'app', 'node_modules')), true);
+    for (const runtime of ['state_5.sqlite', 'state_5.sqlite-shm', 'state_5.sqlite-wal', 'logs_2.sqlite', 'history.jsonl']) {
+      assert.equal(ignored(path.join(taskHome, runtime)), true, `${runtime} is not a live source`);
+    }
+    assert.equal(ignored(path.join(taskHome, 'sqlite', 'state_5.sqlite-shm')), true);
+    // A home whose transcript tree does not exist yet is recognised by its catalog.
+    assert.equal(ignored(path.join(catalogOnly, 'state_5.sqlite-shm')), true);
+    assert.equal(ignored(path.join(catalogOnly, 'sessions')), false);
+
+    // A custom transcript tree and a directory of homes keep the generic policy,
+    // even when that directory has its own `sessions` folder.
+    const sessionsRoot = path.join(taskHome, 'sessions');
+    const tasks = path.join(tmp, 'task');
+    fs.mkdirSync(path.join(tasks, 'sessions'));
+    const generic = watchIgnoreMatcher('codex', { customScanPaths: { codex: [sessionsRoot, tasks] } });
+    assert.equal(generic(path.join(sessionsRoot, '2026', 'rollout-x.jsonl')), false);
+    assert.equal(generic(path.join(tasks, 'other', 'codex-home', 'state_5.sqlite-shm')), false);
+    assert.equal(generic(path.join(taskHome, 'sessions', '2026', 'rollout-x.jsonl')), false, 'nested homes stay live');
+  } finally {
+    os.homedir = originalHomedir;
+    if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = originalCodexHome;
     delete require.cache[collectorPath];
     fs.rmSync(tmp, { recursive: true, force: true });
   }

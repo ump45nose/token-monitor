@@ -14,7 +14,7 @@
 
 const { parseLimitProviders } = require('../../shared/limits/collector');
 const { LIMIT_PROVIDER_REGISTRY, limitProviderEntry } = require('../../shared/limits/registry');
-const { accountForm, limitsAccountConfig, normalizeAccountField } = require('./accountSettings');
+const { accountForm, hasRetainedFixedCredential, limitsAccountConfig, normalizeAccountField } = require('./accountSettings');
 
 // A probe can only prove a credential wrong when the provider itself says so.
 // Everything else — throttling, an outage, a timeout, a malformed answer — says
@@ -46,10 +46,10 @@ function invalid(status, errorCode = '') {
 // main clears its siblings even when the renderer only submits one field.
 // Independently saved settings are excluded so a rendered default
 // cannot become a stored override just because a credential is submitted.
-function draftFor(entry, values) {
+function draftFor(entry, values, includeIndependentSettings = false) {
   const candidate = {};
   for (const field of formFields(entry)) {
-    if (field.submitWithCredential === false || !Object.hasOwn(values, field.key)) continue;
+    if ((field.submitWithCredential === false && !includeIndependentSettings) || !Object.hasOwn(values, field.key)) continue;
     const raw = String(values[field.key] ?? '');
     try {
       candidate[field.key] = normalizeAccountField(field.key, raw);
@@ -80,7 +80,7 @@ function providerSelectionIncluding(selection, providerId) {
   return LIMIT_PROVIDER_REGISTRY.map(({ id }) => id).filter((id) => selected.has(id)).join(',');
 }
 
-function createCredentialCommands({ getSettings, applySettingsPatch, commitCredential, probeDeps, env = process.env }) {
+function createCredentialCommands({ getSettings, applySettingsPatch, commitCredential, probeDeps, env = process.env, allowRetainedFixedCredentials = false }) {
   const revisions = new Map();
   // Discovery can rotate a session before the user chooses an organization.
   // Keep that credential in main so the renderer never receives the secret.
@@ -97,6 +97,8 @@ function createCredentialCommands({ getSettings, applySettingsPatch, commitCrede
     return entry?.form ? entry : null;
   }
 
+  const hasRetainedCredential = providerId => allowRetainedFixedCredentials && hasRetainedFixedCredential(formEntry(providerId), getSettings());
+
   // A settings write that reaches a form's fields through any other path makes
   // an in-flight probe stale, so its result must not land over that write.
   function noteSettingsPatch(patch) {
@@ -108,14 +110,20 @@ function createCredentialCommands({ getSettings, applySettingsPatch, commitCrede
     }
   }
 
-  async function saveCredential(providerId, values) {
+  // Managed profile saves include settings that the legacy form saves independently.
+  async function saveCredential(providerId, values, { includeIndependentSettings = false } = {}) {
     const entry = formEntry(providerId);
     if (!entry || !values || typeof values !== 'object') return invalid('notConfigured');
     // Cookie providers may reuse the validation row for the first runtime poll.
     const checkedSince = Date.now();
     const revision = nextRevision(entry.id);
-    const { candidate, rejected } = draftFor(entry, values);
+    const { candidate, rejected } = draftFor(entry, values, includeIndependentSettings);
     if (rejected) return rejected;
+    const retained = hasRetainedCredential(entry.id);
+    if (retained) {
+      // In this compatibility form, blank passwords leave local values in place.
+      for (const { key, secret } of formFields(entry)) if (secret && !candidate[key]) delete candidate[key];
+    }
     const discover = accountForm(entry).discover;
     const submittedCredential = discover && candidate[discover.credential];
     const pendingRenewal = pendingRenewals.get(entry.id);
@@ -133,7 +141,8 @@ function createCredentialCommands({ getSettings, applySettingsPatch, commitCrede
       if (field.secret && !Object.hasOwn(candidate, field.key)) options[field.key] = '';
     }
     const renewed = {};
-    const deps = { ...probeDeps(renewed), env: {} };
+    const deps = { ...probeDeps(renewed), env: {}, probe: true,
+      onStepfunTokenRenewed: ({ token }) => { renewed.stepfunToken = token; } };
     let discoveredChoices;
     const selectionRequired = (choices) => {
       if (discover && renewed[discover.credential]) {
@@ -177,7 +186,14 @@ function createCredentialCommands({ getSettings, applySettingsPatch, commitCrede
     let status;
     let errorCode = '';
     try {
-      provider = await entry.fetchLimits({ ...options, ...candidate }, deps);
+      provider = retained
+        ? await entry.limits.probeRetainedCredentials(getSettings(), candidate, { ...deps, env })
+        : await entry.fetchLimits({ ...options, ...candidate }, deps);
+      if (Array.isArray(provider)) {
+        const rows = provider.filter(row => row && !row.removed);
+        provider = rows.find(row => row.status === 'ok')
+          || rows.find(row => !['unauthorized', 'notConfigured'].includes(row.status)) || rows[0];
+      }
       status = provider?.status || 'unavailable';
     } catch (error) {
       status = error?.status || 'unavailable';
@@ -217,6 +233,11 @@ function createCredentialCommands({ getSettings, applySettingsPatch, commitCrede
   async function clearCredential(providerId) {
     const entry = formEntry(providerId);
     if (!entry) return { cleared: false };
+    // Owner-backed legacy forms clear only their fixed credential lane. Their
+    // saved slots remain under the provider's management commands.
+    if (entry.accountSlots && (!entry.accountSlotOwner || accountForm(entry)?.kind === 'custom') && !hasRetainedCredential(entry.id)) return { cleared: false, errorCode: 'accountSlotRequired' };
+    // MiniMax's multi-key panel owns a profile store this command cannot write.
+    if (entry.id === 'minimax') return { cleared: false, errorCode: 'customForm' };
     pendingRenewals.delete(entry.id);
     const settings = await applySettingsPatch(Object.fromEntries(
       formFields(entry).filter((field) => field.secret || entry.fields.find((item) => item.key === field.key)?.clearWithCredential).map(({ key }) => [key, ''])
@@ -242,7 +263,7 @@ function createCredentialCommands({ getSettings, applySettingsPatch, commitCrede
     }
   }
 
-  return { saveCredential, clearCredential, listOrganizationChoices, noteSettingsPatch };
+  return { saveCredential, clearCredential, hasRetainedCredential, listOrganizationChoices, noteSettingsPatch };
 }
 
 module.exports = {

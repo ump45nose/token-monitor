@@ -45,33 +45,40 @@ class Element {
 }
 const document = { createElement: () => new Element(), createTextNode: text => Object.assign(new Element(), { textContent: text }) };
 
-test('icon-only tool health disclosures keep an action and client in their name', () => {
+test('tool health disclosures keep an action and client in their name', () => {
   const render = section(app, 'renderToolPreferencesNow', 'connectLimitProviderCheckboxName');
-  const start = render.indexOf("const main = document.createElement('button');");
+  const start = render.indexOf("      main = document.createElement('button');");
   const end = render.indexOf("const panel = document.createElement('div');", start);
-  const button = vm.runInNewContext(`${render.slice(start, end)}\nmain;`, { document, id: 'codex', label: 'Codex', expanded: false, t });
+  const disclosure = new Element();
+  const button = vm.runInNewContext(`let main;\n${render.slice(start, end)}\nmain;`, { document, disclosure, id: 'codex', label: 'Codex', expanded: false, t });
   assert.equal(button.getAttribute('aria-label'), t('settings.tools.health.open', { name: 'Codex' }));
-  assert.equal(button.children[0].getAttribute('aria-hidden'), 'true');
+  assert.equal(disclosure.children[0].className, 'cursor-disclosure-icon');
   assert.equal(button.getAttribute('title'), null);
+  // The chevron column is decorative; the button's name says what it opens.
+  assert.match(render, /disclosure\.className = 'tool-preference-chevron';\n\s*disclosure\.setAttribute\('aria-hidden', 'true'\);/);
 });
 
 test('the OpenCode detected-account checkbox has a localized name and description', async () => {
-  const list = new Element();
+  const ownerDocument = require('./accountOwnerDom.fixture.cjs').createDocument();
+  const createElement = ownerDocument.createElement;
+  ownerDocument.createElement = tag => { const node = createElement(tag); node.appendChild = child => node.append(child); return node; };
+  const list = ownerDocument.createElement('div'); list.id = 'opencodeProfileList'; ownerDocument.root.append(list);
+  list.before = node => ownerDocument.root.insertBefore(node, list);
   const context = {
-    document: { ...document, getElementById: id => id === 'opencodeProfileList' ? list : null },
-    state: { settings: {} }, t, isSettingsSurfaceVisible: () => true,
+    document: ownerDocument, initial: {}, getSettings: () => ({}), getAccountContext: () => ({ settings: {} }), preserveScroll: fn => fn(), localProviderStatuses: () => [],
+    state: { settings: {} }, accountShellApi: require('../../src/electron/renderer/limits/accountShell'), encodeURIComponent, t, isSettingsSurfaceVisible: () => true,
     renderAccountShellError() {}, renderSettingsSummaries() {}, updateOpenCodeProfilesStatus() {},
-    accountProfileRequests: { begin: () => () => true }, accountProfileStatuses: { retire() {} },
+    accountProfileRequests: { begin: () => () => true }, accountProfileStatuses: { retire() {}, begin: () => () => true },
     opencodeMergeOffer: () => ({}),
-    window: { tokenMonitor: { opencode: { getProfiles: async () => ({ profiles: {}, hasAmbientKey: true }) } } }
+    window: { TokenMonitorLegacyAccountList: require('../../src/electron/renderer/limits/legacyAccountList'), tokenMonitor: { opencode: { getProfiles: async () => ({ profiles: {}, hasAmbientKey: true }), status: async () => ({ profiles: {} }) } } }
   };
-  vm.runInNewContext(`${section(app, 'renderOpenCodeProfiles', 'opencodeSaveErrorText')}\nrenderOpenCodeProfiles();`, context);
+  require('../../src/electron/renderer/limits/providerOwners/opencode').create(context).renderOpenCodeProfiles();
   await new Promise(resolve => setImmediate(resolve));
   const checkbox = list.children[0].children[0];
   assert.equal(checkbox.type, 'checkbox');
-  assert.equal(checkbox.getAttribute('aria-label'), t('settings.opencode.ambientName'));
-  assert.equal(checkbox.getAttribute('aria-description'), t('settings.opencode.ambientDetail'));
-  assert.equal(checkbox.getAttribute('title'), null);
+  assert.equal(checkbox.attributes['aria-label'], t('settings.opencode.ambientName'));
+  assert.equal(checkbox.attributes['aria-description'], t('settings.opencode.ambientDetail'));
+  assert.equal(checkbox.attributes.title, undefined);
 });
 
 test('shortcut names follow the saved value, empty state and recording state', () => {
@@ -118,9 +125,10 @@ test('service status buttons describe their affected components', () => {
   const context = {
     document, t, state: { settings: {} }, els: { serviceStatusPanel: panel },
     serviceStatusSurfaceVisible: () => true,
-    serviceStatusRows: () => [{ id: 'openai', label: 'OpenAI', status: 'degraded' }],
+    currentLocale: () => 'en',
+    serviceStatusRows: () => [{ id: 'openai', label: 'OpenAI', status: 'degraded', incidentTitle: 'Incident', componentIssues: [{ name: 'API' }, { name: 'ChatGPT' }] }],
     serviceStatusLabel: () => 'Degraded', serviceStatusMeta: () => '2 components',
-    serviceStatusPresentationApi: { statusHeadline: () => 'Incident', affectedComponentNames: () => ({ all: ['API', 'ChatGPT'] }) }
+    serviceStatusPresentationApi: require('../../src/electron/renderer/serviceStatusPresentation')
   };
   // The source boundary also includes the next async function's prefix.
   const source = section(app, 'renderServiceStatus', 'refreshServiceStatus').replace(/async\s*$/, '');
@@ -129,6 +137,33 @@ test('service status buttons describe their affected components', () => {
   assert.ok(button.getAttribute('aria-description').includes(t('serviceStatus.openPage', { name: 'OpenAI' })));
   assert.ok(button.getAttribute('aria-description').includes('API'));
   assert.ok(button.getAttribute('aria-description').includes('ChatGPT'));
+});
+
+test('DeepSeek rerenders its headline and accessible component names after a language switch', () => {
+  const panel = new Element();
+  let locale = 'zh-CN';
+  const context = {
+    document, t, state: { settings: {} }, els: { serviceStatusPanel: panel },
+    currentLocale: () => locale,
+    serviceStatusSurfaceVisible: () => true,
+    serviceStatusRows: () => [{
+      id: 'deepseek', label: 'DeepSeek', status: 'outage',
+      incidentTitle: 'DeepSeek 网页/API 部分中断（DeepSeek Web/API Partially Unavailable）',
+      componentIssues: [{ name: 'DeepSeek V4 Pro API服务(API Service)' }]
+    }],
+    serviceStatusLabel: () => 'Outage', serviceStatusMeta: () => '1 component',
+    serviceStatusPresentationApi: require('../../src/electron/renderer/serviceStatusPresentation')
+  };
+  const source = section(app, 'renderServiceStatus', 'refreshServiceStatus').replace(/async\s*$/, '');
+  const render = () => vm.runInNewContext(`${source}\nrenderServiceStatus();`, context);
+  render();
+  assert.equal(panel.querySelectorAll('.service-status-description')[0].textContent, 'DeepSeek 网页/API 部分中断');
+  assert.match(panel.children[0].getAttribute('aria-description'), /DeepSeek V4 Pro API服务/);
+  locale = 'zh-TW';
+  render();
+  assert.equal(panel.querySelectorAll('.service-status-description')[0].textContent, 'DeepSeek Web/API Partially Unavailable');
+  assert.match(panel.children[0].getAttribute('aria-description'), /DeepSeek V4 Pro API Service/);
+  assert.doesNotMatch(panel.children[0].getAttribute('aria-description'), /服务/);
 });
 
 test('named Dock session states are exposed while quiet decorations stay hidden', () => {

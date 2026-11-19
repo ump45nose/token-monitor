@@ -3,11 +3,17 @@
 
 'use strict';
 
+const { normalizeLimitProductId } = require('./products');
 const { staleAfterMsForSyncUpload } = require('../syncUploadInterval');
-const { LIMIT_PROVIDER_IDS, VALID_LIMIT_WINDOW_METRICS } = require('./providers');
-const { isWorkbuddyPlaceholder } = require('../providers/workbuddy/identity');
+const { LIMIT_PROVIDER_CATALOG, LIMIT_PROVIDER_IDS, VALID_LIMIT_WINDOW_METRICS } = require('./providers');
+const { providerPolicies } = require('./providerPolicies');
+const { mergeCodexTransientWindows } = require('../providers/codex/corePolicy').createRetentionPolicy({ normalizeLimitsSummary, timestampMs });
+const { openCodeWindowKey, groupOpenCodeCandidates, mergeOpenCodeProviderComponents } = require('../providers/opencode/corePolicy').createComponentPolicy({
+  normalizeLimitWindow, normalizeAccountKeyAliases, statusRank, timestampMs, providerWindowRank, windowOrder: ['session', 'daily', 'weekly', 'billing']
+});
 
 const DEFAULT_LIMITS_REFRESH_MS = 5 * 60 * 1000;
+const PORTABLE_ACCOUNT_PROVIDERS = new Set(LIMIT_PROVIDER_CATALOG.filter(provider => provider.portableAccountKey).map(provider => provider.id));
 const VALID_PROVIDERS = new Set(LIMIT_PROVIDER_IDS);
 const VALID_STATUSES = new Set(['ok', 'disabled', 'notConfigured', 'unauthorized', 'rateLimited', 'sourceRateLimited', 'unavailable', 'error']);
 const VALID_SOURCES = new Set(['oauth', 'cli', 'web', 'rpc', 'local', 'api']);
@@ -16,11 +22,12 @@ const VALID_LIMIT_BOUNDARY_KINDS = new Set(['reset', 'expiry', 'mixed']);
 const VALID_SOURCE_DETAILS = new Set(['app', 'cli', 'ide', 'managed', 'unknown']);
 const VALID_ACTION_REQUIREMENTS = new Set(['accountVerification', 'appSessionEncrypted']);
 const WINDOW_ORDER = ['session', 'daily', 'weekly', 'billing'];
-const CODEX_TRANSIENT_WINDOW_RETENTION_MS = 10 * 60 * 1000;
-const CODEX_TRANSIENT_PROVIDER_STATUSES = new Set(['unavailable', 'error', 'rateLimited', 'sourceRateLimited']);
 const MAX_ACCOUNT_LABEL_INPUT_LENGTH = 256;
 const MAX_ACCOUNT_NAME_INPUT_LENGTH = 512;
-const MAX_OPENCODE_ACCOUNT_KEY_ALIASES = 8;
+// A provider can name one account by several keys: the stable key it reports
+// today and the credential-derived keys it reported before. They travel with
+// the row so the renderer and the quota history read every name as one account.
+const MAX_ACCOUNT_KEY_ALIASES = 8;
 
 function asNumber(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -188,6 +195,7 @@ function normalizeLimitWindow(input) {
     ...(metric ? { metric } : {}),
     ...(source ? { source } : {}),
     ...(limitId ? { limitId } : {}),
+    ...(normalizeLimitProductId(input.productId) ? { productId: normalizeLimitProductId(input.productId) } : {}),
     ...(boundaryKind ? { boundaryKind } : {}),
     ...(input.additional === true ? { additional: true } : {}),
     label: normalizeWindowLabel(input.label || input.displayLabel || input.title),
@@ -245,6 +253,8 @@ function normalizeProviderBalance(input) {
   const weekSpend = numberOrNull(input.weekSpend ?? input.week_spend);
   const monthSpend = numberOrNull(input.monthSpend ?? input.month_spend);
   const allTimeSpend = numberOrNull(input.allTimeSpend ?? input.all_time_spend);
+  const searchSpend = numberOrNull(input.searchSpend ?? input.search_spend);
+  const fetchSpend = numberOrNull(input.fetchSpend ?? input.fetch_spend);
   const requestCountRaw = numberOrNull(input.requestCount ?? input.request_count);
   const requestCount = requestCountRaw === null ? null : Math.max(0, Math.trunc(requestCountRaw));
   const quotaGroup = String(input.quotaGroup ?? input.quota_group ?? '').trim().slice(0, 64);
@@ -272,6 +282,8 @@ function normalizeProviderBalance(input) {
     && weekSpend === null
     && monthSpend === null
     && allTimeSpend === null
+    && searchSpend === null
+    && fetchSpend === null
     && requestCount === null
     && !quotaGroup
     && !expiresAt
@@ -297,6 +309,8 @@ function normalizeProviderBalance(input) {
     weekSpend,
     monthSpend,
     allTimeSpend,
+    ...(searchSpend !== null ? { searchSpend } : {}),
+    ...(fetchSpend !== null ? { fetchSpend } : {}),
     requestCount,
     quotaGroup,
     expiresAt,
@@ -451,28 +465,14 @@ function normalizeProviderUsageSummary(input) {
   return Object.values(summary).some((value) => value !== null && value !== '') ? summary : null;
 }
 
-function normalizeOpenCodeAccountKeyAliases(values, accountKey = '') {
+function normalizeAccountKeyAliases(values, accountKey = '') {
   if (!Array.isArray(values)) return [];
   const canonical = String(accountKey || '').trim();
   return [...new Set(values
     .map((value) => String(value || '').trim())
     .filter((value) => value && value !== canonical && value.length <= 128))]
     .sort()
-    .slice(0, MAX_OPENCODE_ACCOUNT_KEY_ALIASES);
-}
-
-function cursorWindowRank(window) {
-  if (window.metric === 'spend') return 4;
-  if (window.label === 'Requests' || window.label === 'Cursor Models') return 0;
-  if (window.label === 'Other Models') return 1;
-  if (window.label === 'Grok Bot') return 2;
-  return 3;
-}
-
-function codexWindowRank(window) {
-  const kind = String(window?.kind || '');
-  const group = window?.additional === true ? 1 : 0;
-  return group * WINDOW_ORDER.length + WINDOW_ORDER.indexOf(kind);
+    .slice(0, MAX_ACCOUNT_KEY_ALIASES);
 }
 
 function normalizeLimitProvider(input) {
@@ -480,34 +480,17 @@ function normalizeLimitProvider(input) {
   const provider = normalizeProviderId(input.provider);
   if (!provider) return null;
   const accountKey = input.accountKey ? String(input.accountKey) : '';
-  const accountKeyAliases = provider === 'opencode'
-    ? normalizeOpenCodeAccountKeyAliases(input.accountKeyAliases, accountKey)
-    : [];
+  const source = normalizeSource(input.source);
+  const relatedAccountKey = provider === 'minimax' && source === 'api' && typeof input.relatedAccountKey === 'string'
+    && /^sha256:[a-f0-9]{64}$/.test(input.relatedAccountKey) && input.relatedAccountKey !== accountKey
+    ? input.relatedAccountKey : '';
+  const accountKeyAliases = normalizeAccountKeyAliases(input.accountKeyAliases, accountKey);
   const accountLabel = normalizeAccountLabel(input.accountLabel);
   const windows = Array.isArray(input.windows)
     ? input.windows.map(normalizeLimitWindow).filter(Boolean)
     : [];
-  if (provider === 'antigravity') {
-    const groupRank = (window) => {
-      const label = String(window.label || '').toLowerCase();
-      if (label.includes('gemini')) return 0;
-      if (label.includes('claude') || label.includes('gpt')) return 1;
-      return 2;
-    };
-    windows.sort((a, b) => groupRank(a) - groupRank(b)
-      || WINDOW_ORDER.indexOf(a.kind) - WINDOW_ORDER.indexOf(b.kind));
-  } else if (provider === 'cursor') {
-    // Cursor's official dashboard presents its two monthly model pools first,
-    // followed by the optional Grok Bot allowance and on-demand spend. Generic
-    // kind ordering would incorrectly put the weekly Grok row before both pools.
-    windows.sort((a, b) => cursorWindowRank(a) - cursorWindowRank(b));
-  } else if (provider === 'codex') {
-    // Keep canonical lanes ahead of explicitly marked additional buckets. The
-    // display name is intentionally not an identity signal.
-    windows.sort((a, b) => codexWindowRank(a) - codexWindowRank(b));
-  } else {
-    windows.sort((a, b) => WINDOW_ORDER.indexOf(a.kind) - WINDOW_ORDER.indexOf(b.kind));
-  }
+  const rank = providerPolicies[provider]?.windowRank || ((window) => WINDOW_ORDER.indexOf(window.kind));
+  windows.sort((a, b) => rank(a, WINDOW_ORDER) - rank(b, WINDOW_ORDER));
   const balance = normalizeProviderBalance(input.balance);
   const adapterId = provider === 'thirdparty' ? normalizeAdapterId(input.adapterId ?? input.adapter_id) : '';
   const usageSummary = normalizeProviderUsageSummary(input.usageSummary ?? input.usage_summary);
@@ -531,6 +514,7 @@ function normalizeLimitProvider(input) {
     provider,
     ...(adapterId ? { adapterId } : {}),
     accountKey,
+    ...(relatedAccountKey ? { relatedAccountKey } : {}),
     ...(provider === 'opencode' && input.webAccountKey
       ? { webAccountKey: String(input.webAccountKey) }
       : {}),
@@ -542,7 +526,7 @@ function normalizeLimitProvider(input) {
     workspaceKind: normalizeWorkspaceKind(input.workspaceKind),
     status: normalizeStatus(input.status),
     ...(actionRequired ? { actionRequired } : {}),
-    source: normalizeSource(input.source),
+    source,
     sourceDetail: normalizeSourceDetail(input.sourceDetail ?? input.source_detail),
     updatedAt: normalizeIsoTimestamp(input.updatedAt) || normalizeIsoTimestamp(input.checkedAt),
     windows,
@@ -564,7 +548,10 @@ function normalizeLimitsSummary(input) {
   const providers = Array.isArray(source.providers)
     ? source.providers.map(normalizeLimitProvider).filter(Boolean)
     : [];
+  const multiAccountProviders = LIMIT_PROVIDER_IDS.filter(id => Array.isArray(source.multiAccountProviders)
+    && source.multiAccountProviders.includes(id));
   return {
+    ...(multiAccountProviders.length ? { multiAccountProviders } : {}),
     updatedAt: normalizeIsoTimestamp(source.updatedAt),
     refreshMs: normalizeRefreshMs(source.refreshMs),
     providers
@@ -595,76 +582,24 @@ function isProviderStale(provider, summary, device, staleAfterMs, nowMs) {
 }
 
 function providerAggregateKey(provider) {
-  const identity = provider.accountKey || provider.status;
-  if (
-    provider.provider === 'antigravity'
-    && !(provider.accountEmail && isConfiguredProvider(provider))
-  ) {
-    return `${provider.provider}:${identity}:device:${provider.sourceDeviceId || ''}`;
-  }
-  // Keep the existing Muse Code device observations. The web product follows
-  // the shared cross-device winner selection used by other anonymous providers.
-  if (provider.provider === 'muse') {
-    const sourceKey = `${provider.provider}:${identity}:source:${provider.source || ''}`;
-    return provider.source === 'web' ? sourceKey : `${sourceKey}:device:${provider.sourceDeviceId || ''}`;
-  }
-  // One Alibaba Cloud account can hold a Team and a Personal subscription at the
-  // same time, with quotas counted separately. Both rows therefore carry the
-  // same console-issued account id, so identity alone would make the two plans
-  // collide here and one would silently replace the other. `region` holds the
-  // full variant (`cn`, `cn-personal`, …), which separates the plans while
-  // still merging the same plan observed from several devices.
-  if (provider.provider === 'alibaba') {
-    return `${provider.provider}:${identity}:${provider.region || ''}`;
-  }
-  return `${provider.provider}:${identity}`;
+  const key = `${provider.provider}:${provider.accountKey || provider.status}`;
+  return providerPolicies[provider.provider]?.aggregateKey?.(provider, key, isConfiguredProvider(provider)) || key;
 }
 
 function isConfiguredProvider(provider) {
   return Boolean(provider.accountKey && provider.status !== 'notConfigured' && provider.status !== 'disabled'
-    && !isWorkbuddyPlaceholder(provider));
+    && !providerPolicies[provider.provider]?.isPlaceholder?.(provider));
 }
 
-function providerCollapseKey(provider) {
-  // Known WorkBuddy identities survive missing credentials and refresh-token
-  // rotation. Keep every account separate even while its login is unavailable.
-  if (provider.provider === 'workbuddy' && provider.accountKey) return providerAggregateKey(provider);
-  // Antigravity account keys are portable only when a normalized Google email
-  // proves the identity. Anonymous RPC fallback keys are local observations,
-  // so keep the device scope established by providerAggregateKey().
-  if (provider.provider === 'antigravity') return providerAggregateKey(provider);
-  if (provider.provider === 'muse') {
-    return provider.source === 'web' ? `${provider.provider}:source:web` : providerAggregateKey(provider);
-  }
-  if (
-    (provider.provider === 'claude'
-      || provider.provider === 'codex'
-      || provider.provider === 'opencode'
-      || provider.provider === 'openrouter'
-      || provider.provider === 'thirdparty'
-      || provider.provider === 'mimo'
-      || provider.provider === 'cursor'
-      // Cline keys identify the API key or sign-in account id within each lane.
-      // Keep distinct credential identities from synced devices separate;
-      // matching display emails do not establish a shared identity.
-      || provider.provider === 'cline'
-      // Notion allowances are per user AND workspace. Its verified composite
-      // key is portable; neither a provider-only nor an email collapse is safe.
-      || provider.provider === 'notion'
-      // Manus keys hash the account's user id from its session, so the same
-      // account hashes identically on every device.
-      || provider.provider === 'manus'
-      // Volcengine's accountKey comes from the AK/SK and region, so it is the
-      // same on every platform. Two keys mean the Coding/Agent plan split, not
-      // one account hashed twice.
-      || provider.provider === 'volcengine'
-      // Alibaba's accountKey is the console-issued account UID, so it is also
-      // identical on every platform. Two keys mean two accounts, and collapsing
-      // by provider name alone would let one device's row silently replace the
-      // other's.
-      || provider.provider === 'alibaba')
-    && isConfiguredProvider(provider)
-  ) {
+function providerCollapseKey(provider, multiAccount = false) {
+  // A device that reports several accounts keeps every keyed row per account,
+  // ahead of the provider-specific rules below.
+  if (multiAccount && provider.accountKey) return providerAggregateKey(provider);
+  const policy = providerPolicies[provider.provider];
+  if (policy?.preserveAccount && provider.accountKey) return providerAggregateKey(provider);
+  const key = policy?.collapseKey?.(provider, providerAggregateKey(provider));
+  if (key) return key;
+  if (PORTABLE_ACCOUNT_PROVIDERS.has(provider.provider) && isConfiguredProvider(provider)) {
     return providerAggregateKey(provider);
   }
   return provider.provider;
@@ -672,113 +607,15 @@ function providerCollapseKey(provider) {
 
 function providerWindowRank(provider) {
   const windowCount = Array.isArray(provider?.windows) ? provider.windows.length : 0;
-  if (provider?.provider === 'codex') return windowCount > 0 ? 1 : 0;
-  if (provider?.provider === 'opencode') return windowCount;
   // Antigravity quota groups are gated by the client version a device sends
   // (Gemini 4 Argon needs a newer Hub identity). While devices run mixed
   // builds, the same account must not flip between a full and a partial set
-  // depending on which device refreshed last.
+  // depending on which device refreshed last, so rank by real quota groups.
   // A synthetic Balance (credits) window is not a quota group.
   if (provider?.provider === 'antigravity') {
     return (provider.windows || []).filter((window) => window?.metric !== 'credits').length;
   }
-  return 0;
-}
-
-function codexProviderIdentityKeys(provider) {
-  if (provider?.provider !== 'codex') return [];
-  return [
-    provider.accountKey ? `key:${provider.accountKey}` : '',
-    provider.accountEmail ? `email:${provider.accountEmail}` : ''
-  ].filter(Boolean);
-}
-
-function hasProviderWindows(provider) {
-  return Array.isArray(provider?.windows) && provider.windows.length > 0;
-}
-
-function cloneLimitWindows(windows) {
-  return (windows || []).map((window) => ({ ...window }));
-}
-
-function retainedCodexProvider(previousProvider, currentProvider, windows) {
-  return {
-    ...previousProvider,
-    ...currentProvider,
-    accountKey: currentProvider.accountKey || previousProvider.accountKey,
-    accountLabel: currentProvider.accountLabel || previousProvider.accountLabel,
-    planLabel: currentProvider.planLabel || previousProvider.planLabel,
-    accountName: currentProvider.accountName || previousProvider.accountName,
-    accountEmail: currentProvider.accountEmail || previousProvider.accountEmail,
-    source: currentProvider.source || previousProvider.source,
-    sourceDetail: currentProvider.sourceDetail || previousProvider.sourceDetail,
-    status: 'ok',
-    updatedAt: previousProvider.updatedAt || currentProvider.updatedAt,
-    windows: cloneLimitWindows(windows),
-    resetCredits: currentProvider.resetCredits || previousProvider.resetCredits
-  };
-}
-
-function mergeCodexProviderSnapshot(previousProvider, currentProvider) {
-  if (CODEX_TRANSIENT_PROVIDER_STATUSES.has(currentProvider.status)) {
-    return retainedCodexProvider(previousProvider, currentProvider, previousProvider.windows);
-  }
-  if (currentProvider.status !== 'ok') return currentProvider;
-  if (!hasProviderWindows(currentProvider)) {
-    return retainedCodexProvider(previousProvider, currentProvider, previousProvider.windows);
-  }
-  // A successful non-empty snapshot is authoritative. Codex can legitimately
-  // change percentages and reset targets after a global reset or reset-credit
-  // action, so quota values are not monotonic client-side invariants.
-  return currentProvider;
-}
-
-function mergeCodexTransientWindows(previousInput, currentInput, nowMs = Date.now(), retentionMs = CODEX_TRANSIENT_WINDOW_RETENTION_MS) {
-  const current = normalizeLimitsSummary(currentInput);
-  if (!previousInput || !Number.isFinite(Number(retentionMs)) || Number(retentionMs) <= 0) return current;
-  const previous = normalizeLimitsSummary(previousInput);
-  const currentMs = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
-  const previousByIdentity = new Map();
-  const eligiblePreviousCodexProviders = [];
-
-  for (const provider of previous.providers) {
-    if (provider.provider !== 'codex' || provider.status !== 'ok' || !hasProviderWindows(provider)) continue;
-    const effectiveUpdatedAt = provider.updatedAt || previous.updatedAt;
-    const providerUpdatedAt = timestampMs(effectiveUpdatedAt);
-    if (!providerUpdatedAt || currentMs - providerUpdatedAt < 0 || currentMs - providerUpdatedAt > Number(retentionMs)) continue;
-    const eligibleProvider = provider.updatedAt ? provider : { ...provider, updatedAt: effectiveUpdatedAt };
-    eligiblePreviousCodexProviders.push(eligibleProvider);
-    for (const key of codexProviderIdentityKeys(eligibleProvider)) {
-      const existing = previousByIdentity.get(key);
-      if (existing === undefined) {
-        previousByIdentity.set(key, eligibleProvider);
-      } else if (existing && existing !== eligibleProvider) {
-        previousByIdentity.set(key, null);
-      }
-    }
-  }
-
-  const currentCodexProviders = current.providers.filter((provider) => provider.provider === 'codex');
-  const singletonFallback = currentCodexProviders.length === 1 && eligiblePreviousCodexProviders.length === 1
-    ? eligiblePreviousCodexProviders[0]
-    : null;
-
-  return {
-    ...current,
-    providers: current.providers.map((provider) => {
-      if (provider.provider !== 'codex') return provider;
-      const identityKeys = codexProviderIdentityKeys(provider);
-      const identityMatches = new Set(identityKeys.map((key) => previousByIdentity.get(key)).filter(Boolean));
-      const identityMatch = identityMatches.size === 1 ? identityMatches.values().next().value : null;
-      const previousProvider = identityMatch || (
-        CODEX_TRANSIENT_PROVIDER_STATUSES.has(provider.status) && identityKeys.length === 0
-          ? singletonFallback
-          : null
-      );
-      if (!previousProvider) return provider;
-      return mergeCodexProviderSnapshot(previousProvider, provider);
-    })
-  };
+  return providerPolicies[provider?.provider]?.snapshotRank?.(windowCount) || 0;
 }
 
 // A prepaid balance is an account-level fact that only one device can usually
@@ -796,186 +633,15 @@ function carryProviderBalance(winner, loser) {
   return { ...winner, balance: loser.balance, windows };
 }
 
-function openCodeWindowKey(window) {
-  const normalized = normalizeLimitWindow(window);
-  if (!normalized) return '';
-  return [normalized.kind, normalized.metric, normalized.label]
-    .map((value) => String(value || ''))
-    .join(':');
-}
-
-// Authority of one quota observation: a server reading outranks a local
-// estimate, and nothing finer than that. Deliberately.
-//
-// Go quota reaches the wire from three places, but only the estimate is a
-// different *kind* of answer: the usage API and the go-page scrape read the same
-// server-side counters and emit the same window kinds, so two of them differ
-// only in when they were read. Freshness below is what separates those.
-//
-// A finer api tier does not belong here. It could only be read off the provider
-// — an API window is tagged `web` on the wire, since that field is a two-value
-// enum a Hub predating it would strip and then rank below a local estimate — and
-// the provider does not describe every window under it: a provider whose Go
-// quota came from the API still carries Zen windows that were scraped. Ranking
-// on it therefore promotes a scraped window on the strength of a key that read
-// something else. The collector's own api → web precedence is a fallback chain
-// for choosing between two credentials on one machine at one moment; it is not
-// a claim that an older API reading beats a newer scraped one, and generalizing
-// it that way pinned readings up to the full staleness threshold old.
-function openCodeWindowSourceRank(window) {
-  if (window?.source === 'web') return 2;
-  if (window?.source === 'local') return 1;
-  return 0;
-}
-
-function openCodeIdentityKeys(provider) {
-  if (provider?.provider !== 'opencode') return [];
-  return [...new Set([
-    provider.accountKey,
-    provider.webAccountKey,
-    ...(Array.isArray(provider.accountKeyAliases) ? provider.accountKeyAliases : [])
-  ].map((value) => String(value || '').trim()).filter(Boolean))];
-}
-
-function groupOpenCodeCandidates(candidates) {
-  const groups = [];
-  for (const candidate of candidates) {
-    const identityKeys = new Set(openCodeIdentityKeys(candidate));
-    const matching = groups.filter((group) => [...identityKeys].some((key) => group.identityKeys.has(key)));
-    if (matching.length === 0) {
-      groups.push({ candidates: [candidate], identityKeys });
-      continue;
-    }
-    const merged = {
-      candidates: [candidate, ...matching.flatMap((group) => group.candidates)],
-      identityKeys: new Set([
-        ...identityKeys,
-        ...matching.flatMap((group) => [...group.identityKeys])
-      ])
-    };
-    for (const group of matching) groups.splice(groups.indexOf(group), 1);
-    groups.push(merged);
-  }
-  return groups.map((group) => group.candidates);
-}
-
-function openCodeProviderTieBreakKey(provider) {
-  return JSON.stringify([
-    provider?.sourceDeviceId || '',
-    provider?.source || '',
-    provider?.accountLabel || '',
-    provider?.windows || [],
-    provider?.balanceUsd
-  ]);
-}
-
-function betterOpenCodeProvider(current, candidate) {
-  if (!current) return candidate;
-  if (current.stale !== candidate.stale) return current.stale ? candidate : current;
-  const rankDiff = statusRank(candidate.status) - statusRank(current.status);
-  if (rankDiff !== 0) return rankDiff > 0 ? candidate : current;
-  const timestampDiff = timestampMs(candidate.updatedAt) - timestampMs(current.updatedAt);
-  if (timestampDiff !== 0) return timestampDiff > 0 ? candidate : current;
-  const windowRankDiff = providerWindowRank(candidate) - providerWindowRank(current);
-  if (windowRankDiff !== 0) return windowRankDiff > 0 ? candidate : current;
-  return openCodeProviderTieBreakKey(candidate).localeCompare(openCodeProviderTieBreakKey(current)) > 0
-    ? candidate
-    : current;
-}
-
-function betterOpenCodeWindow(current, candidate) {
-  if (!current) return candidate;
-  const sourceRankDiff = openCodeWindowSourceRank(candidate.window) - openCodeWindowSourceRank(current.window);
-  if (sourceRankDiff !== 0) return sourceRankDiff > 0 ? candidate : current;
-  // Released collectors appended Go Web windows before subscription.get
-  // windows without component provenance. Preserve that authority only within
-  // the same legacy observation; cross-device candidates still use freshness
-  // and the deterministic tie-break below.
-  if (
-    current.provider === candidate.provider
-    && openCodeWindowSourceRank(current.window) === 0
-    && openCodeWindowSourceRank(candidate.window) === 0
-  ) return current;
-  const timestampDiff = timestampMs(candidate.provider.updatedAt) - timestampMs(current.provider.updatedAt);
-  if (timestampDiff !== 0) return timestampDiff > 0 ? candidate : current;
-  const candidateKey = JSON.stringify([candidate.provider.sourceDeviceId || '', candidate.window]);
-  const currentKey = JSON.stringify([current.provider.sourceDeviceId || '', current.window]);
-  return candidateKey.localeCompare(currentKey) > 0 ? candidate : current;
-}
-
-function mergeOpenCodeProviderComponents(candidates) {
-  const winner = candidates.reduce(betterOpenCodeProvider, null);
-  if (!winner || winner.provider !== 'opencode') return winner;
-  const eligible = candidates.filter((provider) => !(
-    (provider.stale && !winner.stale)
-    || (provider.status !== 'ok' && winner.status === 'ok')
-  ));
-  const entries = new Map();
-  for (const provider of eligible) {
-    for (const window of provider.windows || []) {
-      const key = openCodeWindowKey(window);
-      entries.set(key, betterOpenCodeWindow(entries.get(key), { window, provider }));
-    }
-  }
-
-  const windows = Array.from(entries.values())
-    .map((entry) => entry.window)
-    .sort((a, b) => WINDOW_ORDER.indexOf(a.kind) - WINDOW_ORDER.indexOf(b.kind)
-      || String(a.label || '').localeCompare(String(b.label || '')));
-  const balanceProvider = eligible
-    .filter((provider) => provider.balanceUsd !== null && provider.balanceUsd !== undefined)
-    .sort((a, b) => timestampMs(b.updatedAt) - timestampMs(a.updatedAt)
-      || openCodeProviderTieBreakKey(b).localeCompare(openCodeProviderTieBreakKey(a)))[0];
-  const balanceUsd = balanceProvider ? balanceProvider.balanceUsd : winner.balanceUsd;
-  const hasWebComponent = windows.some((window) => window.source === 'web')
-    || balanceUsd !== null && balanceUsd !== undefined;
-  // Provenance describes the components that actually won, not whichever
-  // device's snapshot ranked highest. Read off `winner` the two could disagree:
-  // a device whose every window lost still named the merged row's source, so a
-  // cookie poll arriving a second after an API one relabelled the whole row.
-  //
-  // The envelope rule is the collector's, and the merge has to keep it: this
-  // field is what a Hub predating windows[].source ranks on, so it may not
-  // claim a server reading while a local estimate is in the row. One local
-  // window makes the row an estimate however fresh the Web observation beside
-  // it is. Above that line 'api' and 'web' say which server source produced the
-  // Go quota, in the collector's own sense of the words rather than a stronger
-  // one — an `api` provider can carry scraped Zen windows too — so 'api' holds
-  // only while every winning component came from a collector that read the
-  // usage endpoint. A Zen balance does not weaken either claim, because both
-  // are about the quota windows.
-  const anyLocalWindow = windows.some((window) => window.source === 'local');
-  const componentProviders = Array.from(entries.values()).map((entry) => entry.provider);
-  const everyWindowFromApi = componentProviders.length > 0
-    && componentProviders.every((provider) => provider.source === 'api');
-  const mergedSource = anyLocalWindow
-    ? 'local'
-    : everyWindowFromApi
-      ? 'api'
-      : hasWebComponent ? 'web' : winner.source;
-  const canonicalWebAccountKey = [...new Set(candidates
-    .map((provider) => String(provider.webAccountKey || '').trim())
-    .filter(Boolean))].sort()[0] || '';
-  const accountKey = canonicalWebAccountKey || winner.accountKey;
-  const accountKeyAliases = normalizeOpenCodeAccountKeyAliases(
-    candidates.flatMap(openCodeIdentityKeys),
-    accountKey
-  );
-  return {
-    ...winner,
-    accountKey,
-    ...(canonicalWebAccountKey ? { webAccountKey: canonicalWebAccountKey } : {}),
-    ...(accountKeyAliases.length > 0 ? { accountKeyAliases } : {}),
-    source: mergedSource,
-    windows,
-    balanceUsd
-  };
-}
-
-function pickBetterProvider(current, candidate) {
+function pickBetterProvider(current, candidate, multiAccount = false) {
   if (!current) return candidate;
   const winner = betterProvider(current, candidate);
-  return carryProviderBalance(winner, winner === current ? candidate : current);
+  const loser = winner === current ? candidate : current;
+  // In multi-account mode a balance and its credits window belong only to
+  // their exact account, in both aggregation passes.
+  if (multiAccount && winner.accountKey !== loser.accountKey) return winner;
+  const balanced = carryProviderBalance(winner, loser);
+  return providerPolicies[winner.provider]?.carryObservation?.(balanced, loser) || balanced;
 }
 
 function betterProvider(current, candidate) {
@@ -987,20 +653,26 @@ function betterProvider(current, candidate) {
   return timestampMs(candidate.updatedAt) >= timestampMs(current.updatedAt) ? candidate : current;
 }
 
-// Muse's two products refresh independently; a fresh CLI observation cannot
-// retire the Web product's last-good quota, or vice versa.
+// Muse/MiniMax lanes refresh by source; OpenDesign workspaces refresh by account.
+// A fresh sibling cannot retire another lane's last-good quota.
 function providerFreshnessKey(provider) {
-  return provider.provider === 'muse' ? `muse:${provider.source}` : provider.provider;
+  return providerPolicies[provider.provider]?.freshnessKey?.(provider) || provider.provider;
 }
 
 function aggregateLimits(devices, staleAfterMs = 0, nowMs = Date.now()) {
   const aggregate = { updatedAt: new Date(nowMs).toISOString(), providers: [] };
+  const multiAccountProviders = new Set((devices || []).flatMap(device =>
+    normalizeLimitsSummary(device?.limits).multiAccountProviders || []));
   const byKey = new Map();
   const candidatesByKey = new Map();
   const openCodeCandidates = [];
   const providersWithConfiguredAccounts = new Set();
   const providersWithFreshConfiguredAccounts = new Set();
   const providersWithFreshObservations = new Set();
+  // Lanes with a configured account: the freshness key without its account
+  // part, so a source-scoped provider keeps its lanes apart and an
+  // account-scoped one is still one lane.
+  const configuredLanes = new Set();
 
   for (const device of devices || []) {
     const summary = normalizeLimitsSummary(device?.limits);
@@ -1011,7 +683,10 @@ function aggregateLimits(devices, staleAfterMs = 0, nowMs = Date.now()) {
         stale: isProviderStale(provider, summary, device, staleAfterMs, nowMs)
       };
       const freshnessKey = providerFreshnessKey(provider);
-      if (isConfiguredProvider(provider)) providersWithConfiguredAccounts.add(freshnessKey);
+      if (isConfiguredProvider(provider)) {
+        providersWithConfiguredAccounts.add(freshnessKey);
+        configuredLanes.add(providerFreshnessKey({ ...provider, accountKey: '' }));
+      }
       if (!candidate.stale) {
         providersWithFreshObservations.add(freshnessKey);
         if (isConfiguredProvider(provider)) providersWithFreshConfiguredAccounts.add(freshnessKey);
@@ -1028,37 +703,50 @@ function aggregateLimits(devices, staleAfterMs = 0, nowMs = Date.now()) {
   }
 
   for (const [key, candidates] of candidatesByKey) {
-    byKey.set(key, candidates.reduce(pickBetterProvider, null));
+    byKey.set(key, candidates.reduce((current, candidate) =>
+      pickBetterProvider(current, candidate, multiAccountProviders.has(candidate.provider)), null));
   }
   for (const candidates of groupOpenCodeCandidates(openCodeCandidates)) {
     const provider = mergeOpenCodeProviderComponents(candidates);
     byKey.set(providerAggregateKey(provider), provider);
   }
 
-  // Second pass: collapse by provider name. Same OAuth account on Mac vs Windows
-  // hashes to different accountKeys (keychain identity vs file path), so byKey
-  // keeps them as separate entries; without this pass the renderer's per-provider
-  // Map.set() would arbitrarily overwrite the fresh one with the stale one.
-  const hasKnownWorkbuddyAccount = Array.from(byKey.values()).some((candidate) =>
-    candidate.provider === 'workbuddy' && candidate.accountKey && !isWorkbuddyPlaceholder(candidate));
+  // Second pass: collapse device-local credential identities by provider.
+  // Portable accounts and explicitly reported multi-account providers keep each
+  // account's best observation, but a stale portable account still yields to a
+  // fresh account of the same provider.
+  const rowsByProvider = new Map();
+  for (const row of byKey.values()) {
+    const rows = rowsByProvider.get(row.provider) || [];
+    rows.push(row);
+    rowsByProvider.set(row.provider, rows);
+  }
+  const suppressed = new Set();
+  for (const [id, rows] of rowsByProvider) {
+    const omitted = providerPolicies[id]?.suppressCandidates?.(rows, multiAccountProviders.has(id), isConfiguredProvider) || [];
+    for (const row of omitted) suppressed.add(row);
+  }
   const byProvider = new Map();
   for (const candidate of byKey.values()) {
-    // A local-app sentinel is an onboarding hint, not an extra account. Real
-    // identities keep their own failure hints even when none has credentials.
-    if (hasKnownWorkbuddyAccount && isWorkbuddyPlaceholder(candidate)) continue;
-    const knownWorkbuddyAccount = candidate.provider === 'workbuddy' && candidate.accountKey
-      && !isWorkbuddyPlaceholder(candidate);
+    if (suppressed.has(candidate)) continue;
+    const multiAccount = multiAccountProviders.has(candidate.provider);
+    const knownAccount = candidate.accountKey && (multiAccount
+      || providerPolicies[candidate.provider]?.preserveStaleAccount?.(candidate));
     const freshnessKey = providerFreshnessKey(candidate);
+    // A keyless row says nothing once its lane has a configured account. A lane
+    // with no stable identity of its own (Muse Code beside web accounts) stays.
+    if (multiAccount && !candidate.accountKey
+      && configuredLanes.has(providerFreshnessKey({ ...candidate, accountKey: '' }))) continue;
     const hasFreshObservation = providersWithFreshObservations.has(freshnessKey);
     // Fresh siblings cannot establish freshness for a different account. The
     // first pass already chooses the best observation of each exact identity.
-    if (!knownWorkbuddyAccount && candidate.stale && hasFreshObservation) continue;
+    if (!knownAccount && candidate.stale && hasFreshObservation) continue;
     const configuredProviders = hasFreshObservation
       ? providersWithFreshConfiguredAccounts
       : providersWithConfiguredAccounts;
-    if (!knownWorkbuddyAccount && !isConfiguredProvider(candidate) && configuredProviders.has(freshnessKey)) continue;
-    const collapseKey = providerCollapseKey(candidate);
-    byProvider.set(collapseKey, pickBetterProvider(byProvider.get(collapseKey), candidate));
+    if (!knownAccount && !isConfiguredProvider(candidate) && configuredProviders.has(freshnessKey)) continue;
+    const collapseKey = providerCollapseKey(candidate, multiAccount);
+    byProvider.set(collapseKey, pickBetterProvider(byProvider.get(collapseKey), candidate, multiAccount));
   }
   aggregate.providers = Array.from(byProvider.values())
     .sort((a, b) => {
@@ -1078,6 +766,7 @@ function publicLimits(limits) {
     refreshMs: normalized.refreshMs,
     providers: normalized.providers.map(({
       accountKey,
+      relatedAccountKey,
       webAccountKey,
       accountKeyAliases,
       accountEmail,
@@ -1091,7 +780,7 @@ function publicLimits(limits) {
       if (!provider.balance) return provider;
       // `tranches` carries per-grant amounts and expiry dates — billing detail
       // with no public value, dropped alongside the custom group label.
-      const { quotaGroup, tranches, ...publicBalance } = provider.balance;
+      const { quotaGroup, tranches, searchSpend, fetchSpend, ...publicBalance } = provider.balance;
       return { ...provider, balance: publicBalance };
     })
   };
@@ -1105,6 +794,7 @@ function publicLimits(limits) {
 function syncLimits(limits) {
   const normalized = normalizeLimitsSummary(limits);
   return {
+    ...(normalized.multiAccountProviders ? { multiAccountProviders: normalized.multiAccountProviders } : {}),
     updatedAt: normalized.updatedAt,
     refreshMs: normalized.refreshMs,
     providers: normalized.providers
@@ -1114,6 +804,7 @@ function syncLimits(limits) {
 module.exports = {
   DEFAULT_LIMITS_REFRESH_MS,
   aggregateLimits,
+  isProviderStale,
   mergeCodexTransientWindows,
   normalizeLimitProvider,
   normalizeLimitsSummary,

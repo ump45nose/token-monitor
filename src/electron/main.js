@@ -5,18 +5,20 @@ const crypto = require('node:crypto');
 const os = require('node:os');
 const path = require('node:path');
 const { contentSecurityPolicyForRequest } = require('./contentSecurityPolicy');
-const { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, nativeImage, nativeTheme, net, Notification, powerMonitor, protocol, screen, session, shell, systemPreferences } = require('electron');
+const { initializeHubProfiles, hubProfilesForRenderer, prepareHubProfilePatch } = require('./hubProfiles');
+const { app, BaseWindow, BrowserWindow, WebContentsView, clipboard, dialog, globalShortcut, ipcMain, nativeImage, nativeTheme, net, Notification, powerMonitor, protocol, screen, session, shell, systemPreferences } = require('electron');
+
+// All of the app's pages are the same local bundle, and every window Chromium
+// gives its own renderer costs a process baseline plus a compositor for what is
+// often a small card. Process-per-site shares one renderer across them; heavy
+// work already runs in the usage worker, so the shared main thread carries UI
+// only. A renderer crash now takes every window down instead of one surface.
+app.commandLine.appendSwitch('process-per-site');
+
+const { createRetainedWindow, captureRetainedWindowState, restoreRetainedWindowState } = require('./retainedWindow');
 const { autoUpdater } = require('electron-updater');
 const { defaultDeviceId, generateHubSecret, lanIpv4Addresses, loadDotEnv, pidFilePath, readJson, sharedDataDir } = require('../shared/config');
-const {
-  CredentialStore,
-  credentialSettingsForRenderer,
-  hasCredentialSettings,
-  persistSettingsAndCredentials,
-  readRegularFileNoFollow,
-  stripCredentialSettings,
-  writePrivateJsonAtomic
-} = require('../shared/credentialStore');
+const { CredentialStore, credentialSettingsForRenderer, hasCredentialSettings, persistSettingsAndCredentials, stripCredentialSettings, writePrivateJsonAtomic } = require('../shared/credentialStore');
 const { installSafeStdout } = require('../shared/safeStdio');
 const { appVersion } = require('../shared/appVersion');
 const { macWidgetRuntimeSupport } = require('../shared/macSystemRequirements');
@@ -29,8 +31,8 @@ const { clearBackgroundImage, getBackgroundImage, importBackgroundImage } = requ
 const { createClientSourceIpcHandlers } = require('./clientSourceIpc');
 const { createClaudeWebFetch } = require('./providers/claude/webFetch');
 const { createMimoExchangeFetch } = require('./providers/mimo/exchangeFetch');
-const { runAntigravityOAuthLogin } = require('./providers/antigravity/oauthLogin');
-const antigravityOAuth = require('../shared/providers/antigravity/oauth');
+
+
 const workbuddyOAuth = require('../shared/providers/workbuddy/oauth');
 const { createWorkbuddyManagedAccounts } = require('./providers/workbuddy/managedAccounts');
 const {
@@ -38,6 +40,13 @@ const {
   isSupportedWorkbuddyLocalAppPlatform
 } = require('./providers/workbuddy/localAuth');
 const { createElectronLimitsFetch } = require('./limits/fetch');
+const { createLimitsHistoryStore } = require('./limits/historyStore');
+const { historyRowKey } = require('./limits/historyIdentity');
+const { createLimitsHistoryController } = require('./limits/historyController');
+const { LIMIT_PROVIDER_CATALOG: historyProviderCatalog } = require('../shared/limits/providers');
+const { isLimitWindowHidden: historyWindowHidden } = require('../shared/limits/usageItems');
+const { maskEmailAddress: historyMaskEmail } = require('./renderer/accountIdentity');
+const { vendorColors: historyVendorColors } = require('../shared/vendorPresentation');
 const {
   createSessionProxyApplier,
   createProxyReadyFetch,
@@ -53,7 +62,6 @@ const {
   expandedBoundsForCollapse,
   normalWindowBounds,
   persistWindowState,
-  rebuildWindowBounds,
   restoreWindowMaximized,
   restoreWindowMaximizedForReveal,
   setWindowMaximizable,
@@ -139,7 +147,7 @@ const {
   antigravitySyncLockPath,
   repairAntigravitySyncLock
 } = require('../shared/providers/antigravity/selfSync');
-const { deviceRecordFromAnchor } = require('../shared/anchorSeed');
+const { deviceRecordFromAnchor, seedWithColdPreview } = require('../shared/anchorSeed');
 const { sendWhenRendererReady } = require('./deferredWindowSend');
 const { actionWindowForEvent, activateWindowAction, handoffWindow, showWindow } = require('./windowLifecycle');
 const { applyInitialLimitProviderSeed } = require('./initialLimitProviderSeed');
@@ -164,50 +172,38 @@ const {
 } = require('./modelAliasPresentation');
 const { createHub } = require('../hub/server');
 const { probeHubBuild } = require('./hubBuildStatus');
-const {
-  normalizeLimitsRefreshMode,
-  normalizeLimitsRefreshMs,
-  parseBoolean,
-  parseLimitProviders,
-  runCodexLogin
-} = require('../shared/limits/collector');
+const { normalizeLimitsRefreshMode, normalizeLimitsRefreshMs, parseBoolean, parseLimitProviders } = require('../shared/limits/collector');
 const { createCursorUsageEventIndex } = require('../shared/providers/cursor/usageEvents');
-const { limitProviderUrlAllowed } = require('../shared/limits/accounts');
+const { limitAccountRefreshScope, limitProviderUrlAllowed } = require('../shared/limits/accounts');
 const { normalizeLimitProviderHiddenItems } = require('../shared/limits/usageItems');
-const {
-  accountFieldProjection,
-  accountStatusProjection,
-  currentAccountField,
-  finalAccountSettings,
-  initialAccountSettings,
-  limitAccountFormsForRenderer,
-  normalizeAccountField,
-  normalizeAccountPatch,
-  redactOpenRouterProfilesForRenderer,
-  redactThirdPartyProfilesForRenderer,
-  rendererOmittedAccountKeys
-} = require('./limits/accountSettings');
+const { accountFieldProjection, accountStatusProjection, currentAccountField, finalAccountSettings, initialAccountSettings, limitAccountFormsForRenderer, limitConnectionSourcesForRenderer, normalizeAccountPatch, rendererOmittedAccountKeys } = require('./limits/accountSettings');
+const { createOwnerSlotPersistence } = require('./limits/ownerSlotPersistence');
+function ordinarySlotPersistence(provider) {
+  return createOwnerSlotPersistence(provider, () => settings, () => accountSlotService, id => {
+    const store = ensureCredentialStore();
+    if (provider === 'claude') return store.readClaudeWebCredential(id);
+    if (provider === 'antigravity') return store.readAntigravityCredential(id);
+    if (provider === 'workbuddy') return store.readWorkbuddyCredential(id);
+    return null;
+  });
+}
+const { migrateAccountSlots } = require('./limits/accountSlotMigration');
+const { createAccountSlotService, invalidateAccountSlotChange } = require('./limits/accountSlotService');
+const { LIMIT_PROVIDER_REGISTRY } = require('../shared/limits/registry');
+const { isProviderStale } = require('../shared/limits/core');
+const ACCOUNT_SLOT_PROVIDER_IDS = new Set(LIMIT_PROVIDER_REGISTRY.filter(entry => entry.accountSlots).map(entry => entry.id));
+const { normalizeAccountPresentation } = require('./limits/accountPresentation');
+const { applyAccountOrder } = require('./renderer/limits/accountSlotsPanel');
+let accountSlotService;
 const { createCredentialCommands } = require('./limits/credentialCommands');
+const { createCopilotAccounts } = require('./providers/copilot/accounts');
+const { createMinimaxApiKeys } = require('./providers/minimax/apiKeys');
 const { createClaudeManagedAccounts, claudeAccountChangeScope } = require('./providers/claude/managedAccounts');
 const { copilotLoginErrorMessage, isAllowedVerificationUrl, runCopilotDeviceFlowLogin } = require('../shared/providers/copilot/deviceFlow');
-const {
-  codexAuthIdentity,
-  codexAccountKey,
-  codexManagedAccountIdentityKey,
-  codexManagedAccountMatchesIdentity,
-  hashAccountKey,
-  preserveCodexManagedHydrationCollisions,
-  upgradeCodexManagedAccountIdentity
-} = require('../shared/providers/codex/auth');
-const { codexLoginUrlFromOutput, isAllowedCodexLoginUrl } = require('../shared/providers/codex/login');
-const { listCodexWorkspaces, normalizeWorkspaceId } = require('../shared/providers/codex/workspaces');
-const {
-  codexAuthMaterialForWorkspace,
-  codexAccountMatchesIdentity,
-  liveCodexAuthPath,
-  readCodexAuthMaterial,
-  writeCodexAuthFile
-} = require('../shared/providers/codex/systemSwitch');
+
+const { isAllowedCodexLoginUrl } = require('../shared/providers/codex/login');
+
+
 const {
   normalizeClientDisplayOrder,
   normalizeHiddenClients,
@@ -245,17 +241,13 @@ const {
   shouldSkipAppUpdateCheck,
   updateInstallQuitPolicy
 } = require('../shared/appUpdater');
-const cursorAuth = require('../shared/providers/cursor/auth');
-const cursorProbe = require('../shared/providers/cursor/probe');
+
+
 const { stepfunToken } = require('../shared/providers/stepfun/limits');
-const opencodeWeb = require('../shared/providers/opencode/web');
-const opencodeGoApi = require('../shared/providers/opencode/goApi');
-const opencodeProfiles = require('../shared/providers/opencode/profiles');
 
 // The collector reaches the usage API behind a probe deadline; these settings
 // paths call it directly, so they need their own bound or a hung request leaves
 // the account panel spinning and "Save account" pending forever.
-const OPENCODE_API_PROBE_TIMEOUT_MS = 15_000;
 
 // The auto-detected key has an account of its own for exactly as long as no
 // stored account claims it. Ownership is the shared predicate the collector
@@ -266,30 +258,7 @@ const OPENCODE_API_PROBE_TIMEOUT_MS = 15_000;
 // row or retire it: removing the credential that claimed the key left the card
 // without the account that took it over, and naming it left the old synthetic
 // row behind. When ownership of the key changes, the whole provider is rebuilt.
-function refreshOpencodeAmbientOwnership(wasActive) {
-  if (opencodeAmbientKeyActive(settings.opencodeProfiles || {}) === wasActive) return;
-  void queueLimitInvalidation({ provider: 'opencode' }, 'ambient-ownership', { clear: true });
-}
 
-function opencodeAmbientKeyActive(profiles) {
-  const ambientKey = opencodeGoApi.readGoApiKey(process.env);
-  if (!ambientKey) return false;
-  const ambientIdentity = opencodeGoApi.goApiIdentity(ambientKey);
-  return !opencodeProfiles.ambientKeyClaimed(profiles, ambientKey, ambientIdentity);
-}
-
-async function probeOpenCodeApiKey(apiKey) {
-  try {
-    return await opencodeGoApi.fetchGoApi(apiKey, {
-      fetch: electronLimitsFetch(),
-      signal: AbortSignal.timeout(OPENCODE_API_PROBE_TIMEOUT_MS)
-    });
-  } catch (_) {
-    return { status: 'unavailable', windows: [] };
-  }
-}
-const openrouterLimits = require('../shared/providers/openrouter/limits');
-const thirdPartyLimits = require('../shared/providers/thirdparty/limits');
 const subscriptionDisplay = require('../shared/subscriptionDisplay');
 const { CURRENCY_CODES, normalizeCurrency, resolveEffectiveRates, configureRates } = require('../shared/currency');
 const { normalizeCompactTokenUnits } = require('../shared/compactTokens');
@@ -315,16 +284,12 @@ const {
   HUB_STREAM_VERSION,
   createStatsStreamReceiver
 } = require('../shared/hubProtocol');
-const { postSyncPayload, syncPayload } = require('../shared/syncPayload');
+const { createSyncPayloadUploader, syncPayload } = require('../shared/syncPayload');
+const postSyncPayload = createSyncPayloadUploader();
 const { mergedLocalAllTimeSessions } = require('../shared/localSessions');
-const {
-  MIMO_PLATFORM_CONSOLE_URL,
-  createMimoManagedAccount,
-  fetchMimoLimits,
-  normalizeMimoCookieHeader,
-  withDetectedMimoAccount
-} = require('../shared/providers/mimo/limits');
-const { createMimoAccountMetadataReader } = require('./providers/mimo/accountMetadata');
+const { createLocalArchivedSessionCounter } = require('./localArchivedSessionCount');
+const { MIMO_PLATFORM_CONSOLE_URL } = require('../shared/providers/mimo/limits');
+
 const { deviceHistoryRevision, historyPreview, historyRevision } = require('../shared/history');
 const { completeHistorySource, resolveCompleteHistory, resolveCompleteHistoryWithDevices } = require('./historySource');
 const { fixedPeriodHistoryMeta } = require('./fixedPeriodHistory');
@@ -349,6 +314,7 @@ const { projectLimitStatsForDisplay } = require('./limits/statsPresentation');
 const { DEFAULT_WIDGET_KIND, requestMacWidgetReload, resetMacWidgetReloadThrottle } = require('./macWidget/reloader');
 const { WIDGET_DEMAND_MARKER, WIDGET_DEMAND_PROVISIONAL_MARKER, createMacWidgetDemandState } = require('./macWidget/demand');
 const linuxAutostart = require('./linuxAutostart');
+const { canPositionWindow, suppressLinuxSystemContextMenu } = require('./linuxDisplayServer');
 const { codexAccountIdForProvider, localLiveCodexProvider } = require('./renderer/accountIdentity');
 const {
   buildTrayIcon,
@@ -401,6 +367,7 @@ const { createSyncUploadScheduler, normalizeSyncUploadIntervalMs } = require('./
 const { createLatestWinsReconciler } = require('./latestWinsReconciler');
 const { createIcloudSyncStore } = require('./icloudSync');
 const { createIcloudSyncRuntime } = require('./icloudSyncRuntime');
+
 const {
   classifySettingsChange,
   diagnosticConfigurationFromSettings,
@@ -419,6 +386,7 @@ const {
 const {
   canRefreshUsageRuntime,
   drainPendingUsageClientRefreshes: drainPendingUsageClientRefreshQueue,
+  limitRefreshOutcome,
   runLimitInvalidation,
   runManualDeviceRefresh,
   settingsLimitInvalidationPlan
@@ -472,7 +440,8 @@ const {
   normalizeEdgeDockMode,
   normalizeEdgeDockOffset,
   normalizeEdgeDockSide,
-  normalizeEdgeDockSize
+  normalizeEdgeDockSize,
+  normalizeEdgeDockBubbleSize
 } = require('./edgeDock/geometry');
 const { buildEdgeDockCells } = require('./renderer/edgeDock/presentation');
 const edgeDockPresentationApi = require('./renderer/edgeDock/presentation');
@@ -494,15 +463,15 @@ const { NOTCH_BLUR_ALPHA, NOTCH_BLUR_RADIUS, NOTCH_BLUR_STRENGTH, notchBlurMask 
 const { applyProgressiveBlur } = require('./notch/macProgressiveBlur');
 const { monitorMacScrollGesture } = require('./notch/macScrollGesture');
 const { applyVibrancyMask } = require('./edgeDock/macVibrancyMask');
+const { maskCardMaterial } = require('./cardCanvas');
 const { performMacHaptic } = require('./edgeDock/macHaptics');
 const { primaryButtonDown } = require('./edgeDock/pointerButtons');
 const { preventAppActivation, setMoveToActiveSpace } = require('./macosSpaceBehavior');
 const {
-  WINDOWS_BACKDROP_ACCENT,
   normalizeWindowsBackdropMode,
   normalizeWindowsDockBackdropMode
 } = require('./windowsBackdropMode');
-const { applyWindowsAccentBlur } = require('./windowsBackdrop');
+const { refreshWindowsBackdrop, syncWindowsBackdrop, windowsBackdropFallback } = require('./windowsBackdrop');
 const {
   isLiquidGlassBackdrop,
   liquidGlassStyle,
@@ -544,7 +513,7 @@ function appWindowIcon() {
 const DEFAULT_WINDOW = { width: 340, height: 650 };
 const WINDOW_LIMITS = { minWidth: 240, minHeight: 140, maxWidth: 1200, maxHeight: 1400 };
 const ZOOM_LIMITS = { min: 0.7, max: 1.6, step: 0.1 };
-const TRAY_CONTENT_VALUES = new Set(['tokens', 'cost', 'both', 'tokensAll', 'costAll', 'bothAll', 'limitsAllSessions', 'liveTokenRate', 'bars', 'barsSession', 'barsWeekly', 'barsAllSessions', 'icon', 'custom']);
+const TRAY_CONTENT_VALUES = new Set(['tokens', 'cost', 'both', 'tokensMonth', 'costMonth', 'bothMonth', 'tokensAll', 'costAll', 'bothAll', 'limitsAllSessions', 'liveTokenRate', 'bars', 'barsSession', 'barsWeekly', 'barsAllSessions', 'icon', 'custom']);
 const HUB_MODE_VALUES = new Set(['local', 'client', 'host', 'icloud']);
 const LANGUAGE_VALUES = new Set(LANGUAGE_OPTIONS.map((option) => option.value));
 const COLLECTION_MODE_VALUES = new Set(['live', 'smart', 'interval']);
@@ -564,6 +533,7 @@ const TRAY_OPEN_VIEW_IDS = new Set(['home', 'project', 'session', 'limits', 'tre
 
 let mainWindow = null;
 let dashboardWindow = null;
+let dashboardWindowReady = false;
 let settingsPath = null;
 let settings = null;
 let initialLimitProvidersPending = false;
@@ -574,11 +544,16 @@ let initialLimitProvidersPending = false;
 let seededClientSplitsPending = false;
 let persistedSettingsSnapshot = null;
 let credentialStore = null;
+let openrouterSlotsMigrated = false;
+let copilotSlotsMigrated = false;
 let credentialStorageErrorShown = false;
-let antigravityOAuthLoginController = null;
+
 const sessionUsageArchiveStore = createSessionUsageArchiveStore({ cursorUsageEvents: createCursorUsageEventIndex() });
 let rendererViewState = normalizeInitialRendererViewState();
-const serviceStatusClient = createServiceStatusClient();
+// Cursor's status page now redirects to status.x.ai, which is unreachable from
+// mainland China without a proxy — on the global fetch that card would read
+// "Unable to check status" on exactly the networks this transport exists for.
+const serviceStatusClient = createServiceStatusClient({ fetchImpl: electronLimitsFetch() });
 const codexResetForecastClient = createCodexResetForecastClient({
   fetchImpl: electronLimitsFetch()
 });
@@ -588,7 +563,6 @@ const recoverMacWidgetLaunchServicesRegistration = createMacWidgetLaunchServices
 
 app.setName(APP_NAME);
 if (process.platform === 'win32') app.setAppUserModelId('com.javis.tokenmonitor');
-
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.exit(0);
 
@@ -616,6 +590,8 @@ function defaultSettings() {
   return {
     hubMode: envHubUrl ? 'client' : 'local',
     hubUrl: envHubUrl,
+    hubProfiles: [],
+    activeHubProfileId: '',
     hubHostPort: Math.max(1, Math.min(65535, Number(process.env.TOKEN_MONITOR_PORT) || HUB_DEFAULT_PORT)),
     // Default to TOKEN_MONITOR_SECRET so agents that already trust this env
     // value (matching what the CLI hub uses) can connect to the widget's
@@ -650,6 +626,7 @@ function defaultSettings() {
     heatmapMetric: 'cost',
     modelRankingMetric: 'tokens',
     homeActiveDaysWindow: 'all',
+    showExactHomeTrendTokens: false,
     // How a live session's context gauge reads. That direction is a choice the
     // gauge cannot make on its own, so it is stated here rather than assumed:
     // `used` is what the Sessions view and this app's own readouts show, while
@@ -695,6 +672,8 @@ function defaultSettings() {
     edgeDockMacBackdrop: 'inherit',
     edgeDockWindowsBackdrop: 'inherit',
     edgeDockSize: 'medium',
+    edgeDockBubbleSize: 'inherit',
+    edgeDockBubbleCustomScale: 1,
     edgeDockCustomScale: 1,
     edgeDockSide: 'right',
     edgeDockFloatingX: null,
@@ -722,6 +701,7 @@ function defaultSettings() {
     codexDotsVisible: true,
     customScanPaths: {},
     clientDisplayOrder: '',
+    separateQoderClients: false,
     hiddenClients: '',
     pinnedClients: '',
     viewDisplayOrder: '',
@@ -737,7 +717,7 @@ function defaultSettings() {
     historyEnabled: true,
     historyIntervalMs: normalizeHistoryIntervalMs(process.env.TOKEN_MONITOR_HISTORY_INTERVAL_MS),
     sessionUsageArchiveEnabled: parseBoolean(process.env.TOKEN_MONITOR_SESSION_USAGE_ARCHIVE_ENABLED, true),
-    wslScanEnabled: parseBoolean(process.env.TOKEN_MONITOR_WSL_SCAN, true),
+    wslScanEnabled: parseBoolean(process.env.TOKEN_MONITOR_WSL_SCAN, false),
     exportAutoEnabled: false,
     exportDir: '',
     exportIntervalMs: 60 * 1000,
@@ -754,6 +734,7 @@ function defaultSettings() {
     modelAliases: {},
     modelAliasGrouping: 'off',
     limitsEnabled: parseBoolean(process.env.TOKEN_MONITOR_LIMITS_ENABLED, true),
+    limitAccountPresentation: {},
     limitProviders: parseLimitProviders(process.env.TOKEN_MONITOR_LIMIT_PROVIDERS).join(','),
     limitProviderOrder: defaultLimitProviderOrder(),
     homeLimitProviderOrder: '',
@@ -767,7 +748,9 @@ function defaultSettings() {
     cursorManualAccountIds: [],
     showLimitSource: parseBoolean(process.env.TOKEN_MONITOR_SHOW_LIMIT_SOURCE, false),
     maskLimitAccountEmails: false,
+    limitsHistoryOpenMode: 'hover',
     claudePrepaidBalanceEnabled: parseBoolean(process.env.TOKEN_MONITOR_CLAUDE_PREPAID_BALANCE, true),
+    claudeCliFallbackEnabled: true,
     // The key OpenCode stores for itself needs no setup, so tracking it is the
     // default. This turns that off for a machine that is signed in to an account
     // the user does not want reported.
@@ -921,6 +904,8 @@ function electronLimitsConfig() {
   const workbuddyDesktopSessionEnabled = workbuddyEnabled && workbuddyDesktopSessionSupported;
   return limitsConfigFromSettings(settings, {
     env: process.env,
+    openrouterSlotsMigrated,
+    copilotSlotsMigrated,
     workbuddyDesktopSessionOnly: true,
     workbuddyDesktopSessionSupported,
     workbuddyDesktopSessionEnabled,
@@ -950,11 +935,152 @@ function defaultLimitProviderOrder() {
   return parseLimitProviders().join(',');
 }
 
+const { createAntigravityAccountService } = require('./providers/antigravity/accountService');
+let antigravityAccountsOwner;
+function antigravityAccountService() {
+  return antigravityAccountsOwner ||= createAntigravityAccountService({
+    slotPersistence: ordinarySlotPersistence('antigravity'),
+    getAntigravityManagedAccounts: () => settings?.antigravityManagedAccounts,
+    getCredentialStore: ensureCredentialStore,
+    electronLimitsFetch,
+    openExternal: url => shell.openExternal(url),
+    setAntigravityManagedAccounts: value => { settings.antigravityManagedAccounts = value; },
+    saveSettings,
+    pushSettingsToRenderer,
+    sendAntigravityAccountsPush,
+    queueLimitInvalidation,
+  });
+}
+function normalizeAntigravityManagedAccounts(...args) { return antigravityAccountService().normalizeAntigravityManagedAccounts(...args); }
+function antigravityAccountsForRenderer(...args) { return antigravityAccountService().antigravityAccountsForRenderer(...args); }
+
+function antigravityManagedAccountsForCollector(...args) { return antigravityAccountService().antigravityManagedAccountsForCollector(...args); }
+function persistAntigravityCredentialsRenewal(...args) { return antigravityAccountService().persistAntigravityCredentialsRenewal(...args); }
+function addAntigravityManagedAccount(...args) { return antigravityAccountService().addAntigravityManagedAccount(...args); }
+function cancelAntigravityManagedAccountLogin(...args) { return antigravityAccountService().cancelAntigravityManagedAccountLogin(...args); }
+function removeAntigravityManagedAccount(...args) { return antigravityAccountService().removeAntigravityManagedAccount(...args); }
+function setAntigravityManagedAccountEnabled(...args) { return antigravityAccountService().setAntigravityManagedAccountEnabled(...args); }
+
+// The address (never a token) the local Antigravity language server last
+// reported, so this device's own sign-in stays selectable while agy is closed
+// and across restarts. Only written when it changes.
+function persistAntigravityLocalAccount({ accountEmail } = {}) {
+  const email = String(accountEmail || '').trim().toLowerCase();
+  if (!settings || !email || !email.includes('@')) return false;
+  if (String(settings.antigravityLocalAccount?.accountEmail || '').toLowerCase() === email) return true;
+  settings.antigravityLocalAccount = { accountEmail: email, seenAt: new Date().toISOString() };
+  saveSettings();
+  return true;
+}
+
+const { createMimoAccountService } = require('./providers/mimo/accountService');
+let mimoAccountsOwner;
+function mimoAccountService() {
+  return mimoAccountsOwner ||= createMimoAccountService({
+    getMimoManagedAccounts: () => settings?.mimoManagedAccounts,
+    getUserDataPath: () => app.getPath('userData'),
+    getCredentialStore: ensureCredentialStore,
+    credentialProbeDeps,
+    setMimoManagedAccounts: value => { settings.mimoManagedAccounts = value; },
+    saveSettings,
+    pushSettingsToRenderer,
+    sendMimoAccountsPush,
+    queueLimitInvalidation,
+  });
+}
+function normalizeMimoManagedAccounts(...args) { return mimoAccountService().normalizeMimoManagedAccounts(...args); }
+
+function mimoAccountsForRenderer(...args) { return mimoAccountService().mimoAccountsForRenderer(...args); }
+function mimoManagedAccountsForCollector(...args) { return mimoAccountService().mimoManagedAccountsForCollector(...args); }
+
+function addMimoManagedAccount(...args) { return mimoAccountService().addMimoManagedAccount(...args); }
+function removeMimoManagedAccount(...args) { return mimoAccountService().removeMimoManagedAccount(...args); }
+function setMimoManagedAccountEnabled(...args) { return mimoAccountService().setMimoManagedAccountEnabled(...args); }
+function migrateLegacyMimoCredentialFiles(...args) { return mimoAccountService().migrateLegacyMimoCredentialFiles(...args); }
+
+const { createCodexAccountService } = require('./providers/codex/accountService');
+let codexAccountsOwner;
+function codexAccountService() {
+  return codexAccountsOwner ||= createCodexAccountService({
+    getLimitsRuntime: () => deviceRuntimeHandle,
+    isEnabled: () => settings?.limitsEnabled !== false && parseLimitProviders(settings?.limitProviders).includes('codex'),
+    getCodexManagedAccounts: () => settings?.codexManagedAccounts,
+    electronProviderDeps,
+    setCodexManagedAccounts: value => { settings.codexManagedAccounts = value; },
+    saveSettings,
+    pushSettingsToRenderer,
+    queueLimitInvalidation,
+    getUserDataPath: () => app.getPath('userData'),
+  });
+}
+function normalizeCodexManagedAccounts(...args) { return codexAccountService().normalizeCodexManagedAccounts(...args); }
+function hydrateCodexManagedAccounts(...args) { return codexAccountService().hydrateCodexManagedAccounts(...args); }
+function hydrateCodexManagedWorkspaceLabels(...args) { return codexAccountService().hydrateCodexManagedWorkspaceLabels(...args); }
+
+function codexAccountsForRenderer(...args) { return codexAccountService().codexAccountsForRenderer(...args); }
+function codexManagedAccountsForCollector(...args) { return codexAccountService().codexManagedAccountsForCollector(...args); }
+
+
+
+
+function removeCodexManagedAccount(...args) { return codexAccountService().removeCodexManagedAccount(...args); }
+function setCodexManagedAccountEnabled(...args) { return codexAccountService().setCodexManagedAccountEnabled(...args); }
+
+
+const { createCursorAccountService } = require('./providers/cursor/accountService');
+let cursorAccountsOwner;
+function cursorAccountService() {
+  return cursorAccountsOwner ||= createCursorAccountService({
+    isExternalAgentActive,
+    getCursorDisabledAccountIds: () => settings?.cursorDisabledAccountIds,
+    getCursorManualAccountIds: () => settings?.cursorManualAccountIds,
+    setCursorDisabledAccountIds: value => { settings.cursorDisabledAccountIds = value; },
+    setCursorManualAccountIds: value => { settings.cursorManualAccountIds = value; },
+    saveSettings,
+    reconfigureLimits: () => deviceRuntimeHandle?.reconfigureLimits(electronLimitsConfig()),
+    queueLimitInvalidation,
+    refreshUsage: () => bestEffortTrackedUsageRefresh('cursor', { forceSync: true }),
+  });
+}
+
+
+const { createOpencodeAccountService } = require('./providers/opencode/accountService');
+let opencodeAccountsOwner;
+function opencodeAccountService() {
+  return opencodeAccountsOwner ||= createOpencodeAccountService({
+    getOpencodeProfiles: () => settings?.opencodeProfiles,
+    queueLimitInvalidation,
+    electronLimitsFetch,
+    setOpencodeProfiles: value => { settings.opencodeProfiles = value; },
+    setOpencodeCookie: value => { settings.opencodeCookie = value; },
+    saveSettings,
+    electronProviderDeps,
+    getOpencodeAmbientEnabled: () => settings?.opencodeAmbientEnabled,
+    getOpencodeCookie: () => settings?.opencodeCookie,
+    setOpencodeAmbientEnabled: value => { settings.opencodeAmbientEnabled = value; },
+  });
+}
+
+const { createThirdpartyAccountService } = require('./providers/thirdparty/accountService');
+let thirdpartyAccountsOwner;
+function thirdpartyAccountService() {
+  return thirdpartyAccountsOwner ||= createThirdpartyAccountService({
+    getThirdPartyProfiles: () => settings?.thirdPartyProfiles,
+    setThirdPartyProfiles: value => { settings.thirdPartyProfiles = value; },
+    saveSettings,
+    electronProviderDeps,
+    queueLimitInvalidation,
+  });
+}
+function persistThirdPartyCredentialsRenewal(...args) { return thirdpartyAccountService().persistThirdPartyCredentialsRenewal(...args); }
+function persistThirdPartyAccountKey(...args) { return thirdpartyAccountService().persistThirdPartyAccountKey(...args); }
+
 let claudeManagedAccountService = null;
 
 function claudeAccountService() {
   if (!claudeManagedAccountService) {
     claudeManagedAccountService = createClaudeManagedAccounts({
+      slotPersistence: ordinarySlotPersistence('claude'),
       getSettings: () => settings,
       setSettings: (next) => { settings = next; },
       saveSettings: () => saveSettings({ throwOnError: true }),
@@ -974,20 +1100,8 @@ function claudeAccountService() {
   return claudeManagedAccountService;
 }
 
-function persistClaudeWebCookieRenewal({ accountId, previousCookie, cookie } = {}) {
-  if (accountId) return claudeAccountService().renew({ accountId, previousCookie, cookie });
-  if (!settings?.claudeWebCookie) return false;
-  let expected;
-  let renewed;
-  try {
-    expected = normalizeAccountField('claudeWebCookie', previousCookie);
-    renewed = normalizeAccountField('claudeWebCookie', cookie);
-  } catch (_) { return false; }
-  if (!renewed || normalizeAccountField('claudeWebCookie', settings.claudeWebCookie) !== expected) return false;
-  if (settings.claudeWebCookie === renewed) return true;
-  settings.claudeWebCookie = renewed;
-  saveSettings({ throwOnError: true });
-  return true;
+function persistClaudeWebCookieRenewal(renewal = {}) {
+  return claudeAccountService().renewCookie(renewal);
 }
 
 // The StepFun Oasis token's access half expires every 30 minutes; the limits
@@ -1047,6 +1161,8 @@ function electronLimitsDeps() {
         json: () => result.json()
       };
     },
+    onAccountSlotResolved: (...args) => { void accountSlotService?.resolved(...args).catch(() => {}); },
+    onAccountSlotCredentialRenewed: renewal => accountSlotService?.renew(renewal),
     resolveConfigSnapshot: () => electronLimitsConfig(),
     onClaudeWebCookieRenewed: persistClaudeWebCookieRenewal,
     onClaudeWebAccountResolved: (observation) => claudeAccountService().resolved(observation),
@@ -1057,211 +1173,93 @@ function electronLimitsDeps() {
     onAntigravityLocalAccountObserved: persistAntigravityLocalAccount,
     resolveWorkbuddyManagedCredential: (account, options) => workbuddyAccountService().resolveCredential(account, options),
     onThirdPartyCredentialsRenewed: persistThirdPartyCredentialsRenewal,
-    onThirdPartyAccountKeyResolved: persistThirdPartyAccountKey
+    onThirdPartyAccountKeyResolved: persistThirdPartyAccountKey,
+    onUpdate: updateSettingsLocalLimits,
+    onEvent: (event) => {
+      if (event?.type === 'probe-start' || event?.type === 'probe-finish') publishLimitProbes(event.probes);
+    }
   };
 }
 
+// One provider's quota, or one account's where the provider can narrow to it:
+// the settings panel's refresh and a quota row's own button, on any surface.
+// The rows repaint from the limits update the probe publishes; the answer says
+// whether one is coming (limitRefreshOutcome).
+async function refreshLimitProvider(providerId, account) {
+  const provider = String(providerId || '').trim();
+  const parsed = parseLimitProviders(provider);
+  if (parsed.length !== 1 || parsed[0] !== provider) return { ok: false, reason: 'unavailable', error: 'unknown provider' };
+  if (!deviceRuntimeHandle) return { ok: false, reason: 'unavailable', error: 'limits runtime is not ready' };
+  const scope = account && typeof account === 'object'
+    ? limitAccountRefreshScope(provider, account)
+    : { provider };
+  try {
+    return limitRefreshOutcome(await runLimitInvalidation(deviceRuntimeHandle, scope, 'account-panel', { clear: false }));
+  } catch (error) {
+    return { ok: false, reason: 'failed', error: error?.message || String(error) };
+  }
+}
 
-let codexLoginController = null;
-let codexLoginFlowId = '';
-let codexLoginCanCancel = false;
-let codexWorkspaceSelection = null;
-let codexWorkspaceLabelHydrationPromise = null;
+// The limits probes running right now, for the quota rows' refresh buttons to
+// show a background refresh as well as one the user started.
+let limitProbes = [];
+let settingsLocalLimits = null;
+let settingsLimitsRevision = 0;
+let settingsLimitsPushQueued = false;
+function updateSettingsLocalLimits(limits) {
+  settingsLocalLimits = { deviceId: settings.deviceId, limits, revision: ++settingsLimitsRevision };
+  if (settingsLimitsPushQueued) return;
+  settingsLimitsPushQueued = true;
+  // Limit rows commit before probe-finish. Send the result and the final probe
+  // list together. Changes without a lifecycle event still reach Settings.
+  queueMicrotask(() => {
+    if (settingsLimitsPushQueued) pushSettingsLimitState();
+  });
+}
+function settingsLimitState() {
+  return { probes: limitProbes, local: settingsLocalLimits };
+}
+function pushSettingsLimitState() {
+  settingsLimitsPushQueued = false;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    mainWindow.webContents.send('limits:probes', settingsLimitState());
+  } catch (_) {}
+}
+function publishLimitProbes(probes) {
+  limitProbes = Array.isArray(probes) ? probes : [];
+  edgeDockController?.setLimitProbes(limitProbes);
+  pushSettingsLimitState();
+}
+function clearSettingsLimitState() {
+  if (!settingsLocalLimits && !limitProbes.length) return;
+  settingsLocalLimits = null;
+  publishLimitProbes([]);
+}
+
+
+
+
+
+
+
 let copilotLoginController = null;
 let copilotLoginFlowId = '';
-const CODEX_WORKSPACE_LABEL_HYDRATION_CONCURRENCY = 3;
+
 
 // Startup label hydration is a small one-shot map. LimitsRuntime's bounded
 // executor owns lane-aware provider refresh state, so it is not reusable here.
-async function mapWithConcurrency(items, concurrency, mapper) {
-  const results = new Array(items.length);
-  let nextIndex = 0;
-  async function worker() {
-    while (nextIndex < items.length) {
-      const index = nextIndex;
-      nextIndex += 1;
-      results[index] = await mapper(items[index], index);
-    }
-  }
-  const workerCount = Math.min(items.length, Math.max(1, Math.trunc(concurrency) || 1));
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
-  return results;
-}
-
-function normalizeCodexManagedAccounts(value) {
-  if (!Array.isArray(value)) return [];
-  const seen = new Set();
-  const accounts = [];
-  for (const account of value) {
-    if (!account || typeof account !== 'object') continue;
-    const id = String(account.id || '').trim();
-    const homePath = String(account.homePath || '').trim();
-    if (!id || !homePath) continue;
-    const email = String(account.email || '').trim().toLowerCase();
-    const workspaceAccountId = normalizeWorkspaceId(
-      account.workspaceAccountId
-      || account.providerAccountId
-    );
-    const rawWorkspaceLabel = String(account.workspaceLabel || '').trim();
-    const workspaceKind = account.workspaceKind === 'personal' ? 'personal' : '';
-    const accountKey = String(account.accountKey || '').trim();
-    const dedupe = codexManagedAccountIdentityKey({
-      id,
-      accountKey,
-      email,
-      workspaceAccountId
-    });
-    if (seen.has(dedupe)) continue;
-    seen.add(dedupe);
-    accounts.push({
-      id,
-      email,
-      accountKey,
-      accountLabel: String(account.accountLabel || '').trim(),
-      workspaceAccountId,
-      workspaceLabel: workspaceKind ? '' : rawWorkspaceLabel,
-      workspaceKind,
-      homePath,
-      authPath: String(account.authPath || path.join(homePath, 'auth.json')).trim(),
-      addedAt: account.addedAt || new Date().toISOString(),
-      updatedAt: account.updatedAt || account.addedAt || new Date().toISOString(),
-      enabled: account.enabled !== false
-    });
-  }
-  return accounts;
-}
-
-function hydrateCodexManagedAccounts(value) {
-  const storedAccounts = normalizeCodexManagedAccounts(value);
-  const hydratedAccounts = storedAccounts.map((account) => {
-    try {
-      const auth = JSON.parse(readRegularFileNoFollow(account.authPath, {
-        fs,
-        description: 'Managed Codex auth',
-        encoding: 'utf8'
-      }));
-      return upgradeCodexManagedAccountIdentity(account, codexAuthIdentity(auth));
-    } catch (_) {
-      return account;
-    }
-  });
-  const resolvedAccounts = preserveCodexManagedHydrationCollisions(storedAccounts, hydratedAccounts);
-  if (resolvedAccounts.some((account, index) => account !== hydratedAccounts[index])) {
-    console.warn('[codex] Managed account identity hydration found a collision; preserved stored identities.');
-  }
-  return resolvedAccounts;
-}
-
-function hydrateCodexManagedWorkspaceLabels() {
-  if (codexWorkspaceLabelHydrationPromise) return codexWorkspaceLabelHydrationPromise;
-  if (
-    settings?.limitsEnabled === false
-    || !parseLimitProviders(settings?.limitProviders).includes('codex')
-  ) return Promise.resolve(false);
-  const candidates = normalizeCodexManagedAccounts(settings?.codexManagedAccounts)
-    .filter((account) => (
-      account.enabled !== false
-      && account.workspaceAccountId
-      && !account.workspaceLabel
-      && !account.workspaceKind
-    ));
-  if (candidates.length === 0) return Promise.resolve(false);
-
-  const task = mapWithConcurrency(
-    candidates,
-    CODEX_WORKSPACE_LABEL_HYDRATION_CONCURRENCY,
-    async (account) => {
-      try {
-        const auth = JSON.parse(readRegularFileNoFollow(account.authPath, {
-          fs,
-          description: 'Managed Codex auth',
-          encoding: 'utf8'
-        }));
-        const workspaces = await listCodexWorkspaces(auth, electronProviderDeps({ env: process.env }));
-        const workspace = workspaces.find((entry) => entry.id === account.workspaceAccountId);
-        return workspace
-          ? {
-              id: account.id,
-              workspaceAccountId: account.workspaceAccountId,
-              label: workspace.label,
-              workspaceKind: workspace.workspaceKind
-            }
-          : null;
-      } catch (_) {
-        return null;
-      }
-    }
-  ).then((results) => {
-    const labels = new Map(
-      results.filter(Boolean).map((result) => [result.id, result])
-    );
-    if (labels.size === 0) return false;
-    let changed = false;
-    const accounts = normalizeCodexManagedAccounts(settings?.codexManagedAccounts).map((account) => {
-      const resolved = labels.get(account.id);
-      if (!resolved || account.enabled === false || account.workspaceAccountId !== resolved.workspaceAccountId) {
-        return account;
-      }
-      const shouldHydrateLabel = !account.workspaceLabel && !account.workspaceKind;
-      if (!shouldHydrateLabel) return account;
-      changed = true;
-      return {
-        ...account,
-        ...(shouldHydrateLabel ? {
-          workspaceLabel: resolved.label,
-          workspaceKind: resolved.workspaceKind
-        } : {}),
-        updatedAt: new Date().toISOString()
-      };
-    });
-    if (!changed) return false;
-    settings.codexManagedAccounts = accounts;
-    saveSettings();
-    pushSettingsToRenderer();
-    void queueLimitInvalidation({ provider: 'codex' }, 'workspace-label-hydrated');
-    return true;
-  });
-
-  codexWorkspaceLabelHydrationPromise = task.finally(() => {
-    codexWorkspaceLabelHydrationPromise = null;
-  });
-  return codexWorkspaceLabelHydrationPromise;
-}
-
-function codexAccountsForRenderer() {
-  return normalizeCodexManagedAccounts(settings?.codexManagedAccounts).map(({
-    id, email, accountKey, accountLabel, workspaceAccountId, workspaceLabel, workspaceKind, addedAt, updatedAt, enabled
-  }) => ({
-    id,
-    email,
-    accountKey,
-    accountLabel,
-    workspaceAccountId,
-    workspaceLabel,
-    workspaceKind,
-    addedAt,
-    updatedAt,
-    enabled
-  }));
-}
-
-function codexManagedAccountsForCollector() {
-  return normalizeCodexManagedAccounts(settings?.codexManagedAccounts);
-}
-
-function normalizeAntigravityManagedAccounts(value) {
-  return antigravityOAuth.normalizeManagedAccounts(value);
-}
 
 let workbuddyManagedAccountService = null;
 
 function workbuddyAccountsForRenderer() {
-  return workbuddyOAuth.normalizeManagedAccounts(settings?.workbuddyManagedAccounts);
+  return workbuddyOAuth.normalizeManagedAccounts(ordinarySlotPersistence('workbuddy').accounts());
 }
 
 function workbuddyAccountService() {
   if (!workbuddyManagedAccountService) {
     workbuddyManagedAccountService = createWorkbuddyManagedAccounts({
+      slotPersistence: ordinarySlotPersistence('workbuddy'),
       getAccounts: () => settings?.workbuddyManagedAccounts,
       setAccounts: (accounts) => { settings.workbuddyManagedAccounts = accounts; },
       saveSettings: () => saveSettings({ throwOnError: true }),
@@ -1297,758 +1295,6 @@ async function workbuddyAccountOperation(operation) {
   }
 }
 
-function antigravityAccountsForRenderer() {
-  return normalizeAntigravityManagedAccounts(settings?.antigravityManagedAccounts);
-}
-
-function readAntigravityCredential(id) {
-  try {
-    return ensureCredentialStore().readAntigravityCredential(id);
-  } catch (_) {
-    return null;
-  }
-}
-
-function writeAntigravityCredential(id, credentials) {
-  try {
-    return ensureCredentialStore().writeAntigravityCredential(id, credentials);
-  } catch (_) {
-    return false;
-  }
-}
-
-function removeAntigravityCredential(id) {
-  try {
-    return ensureCredentialStore().removeAntigravityCredential(id);
-  } catch (_) {
-    return false;
-  }
-}
-
-function antigravityManagedAccountsForCollector() {
-  return antigravityOAuth.managedAccountsForCollector(
-    settings?.antigravityManagedAccounts,
-    readAntigravityCredential
-  );
-}
-
-function persistAntigravityCredentialsRenewal({ account, credentials, previous } = {}) {
-  const accountId = String(account?.id || '').trim();
-  if (!accountId || !credentials || typeof credentials !== 'object') return false;
-  const current = readAntigravityCredential(accountId);
-  if (!current || JSON.stringify(current) !== JSON.stringify(previous || {})) return false;
-  return writeAntigravityCredential(accountId, credentials);
-}
-
-// The address (never a token) the local Antigravity language server last
-// reported, so this device's own sign-in stays selectable while agy is closed
-// and across restarts. Only written when it changes.
-function persistAntigravityLocalAccount({ accountEmail } = {}) {
-  const email = String(accountEmail || '').trim().toLowerCase();
-  if (!settings || !email || !email.includes('@')) return false;
-  if (String(settings.antigravityLocalAccount?.accountEmail || '').toLowerCase() === email) return true;
-  settings.antigravityLocalAccount = { accountEmail: email, seenAt: new Date().toISOString() };
-  saveSettings();
-  return true;
-}
-
-async function addAntigravityManagedAccount() {
-  if (antigravityOAuthLoginController) return { ok: false, errorCode: 'loginInProgress' };
-  const controller = new AbortController();
-  antigravityOAuthLoginController = controller;
-  try {
-    const { credential, identity } = await runAntigravityOAuthLogin({
-      env: process.env,
-      fetch: electronLimitsFetch(),
-      openExternal: (url) => shell.openExternal(url),
-      signal: controller.signal,
-      logger: (message) => console.log(`[antigravity-oauth] ${message}`)
-    });
-    const accounts = normalizeAntigravityManagedAccounts(settings?.antigravityManagedAccounts);
-    const now = new Date().toISOString();
-    const existing = accounts.find((account) => account.accountEmail === identity.email);
-    const account = {
-      id: existing?.id || `antigravity-${crypto.randomUUID()}`,
-      accountKey: antigravityOAuth.accountKey(identity.email),
-      accountEmail: identity.email,
-      accountLabel: existing?.accountLabel || identity.name || '',
-      enabled: true,
-      addedAt: existing?.addedAt || now,
-      updatedAt: now
-    };
-    const previousCredential = existing ? readAntigravityCredential(existing.id) : null;
-    if (!writeAntigravityCredential(account.id, {
-      ...credential,
-      refreshToken: credential.refreshToken || previousCredential?.refreshToken || ''
-    })) {
-      return { ok: false, errorCode: 'credentialStorageUnavailable' };
-    }
-    settings.antigravityManagedAccounts = normalizeAntigravityManagedAccounts([
-      ...accounts.filter((entry) => entry.id !== account.id && entry.accountEmail !== account.accountEmail),
-      account
-    ]);
-    try {
-      saveSettings({ throwOnError: true });
-    } catch (_) {
-      if (previousCredential) writeAntigravityCredential(account.id, previousCredential);
-      else removeAntigravityCredential(account.id);
-      return { ok: false, errorCode: 'credentialStorageUnavailable' };
-    }
-    pushSettingsToRenderer();
-    sendAntigravityAccountsPush();
-    void queueLimitInvalidation({
-      provider: 'antigravity',
-      accountId: account.id,
-      accountKey: account.accountKey,
-      accountEmail: account.accountEmail,
-      sourceDetail: 'oauth'
-    }, 'account-added');
-    return { ok: true, accounts: antigravityAccountsForRenderer() };
-  } catch (error) {
-    const cancelled = controller.signal.aborted || error?.code === 'CANCELLED' || error?.name === 'AbortError';
-    return {
-      ok: false,
-      errorCode: cancelled ? 'cancelled' : error?.code || 'loginFailed',
-      error: cancelled ? '' : String(error?.message || error)
-    };
-  } finally {
-    if (antigravityOAuthLoginController === controller) antigravityOAuthLoginController = null;
-  }
-}
-
-function cancelAntigravityManagedAccountLogin() {
-  if (!antigravityOAuthLoginController) return false;
-  antigravityOAuthLoginController.abort();
-  return true;
-}
-
-async function removeAntigravityManagedAccount(id) {
-  const accountId = String(id || '').trim();
-  const accounts = normalizeAntigravityManagedAccounts(settings?.antigravityManagedAccounts);
-  const account = accounts.find((entry) => entry.id === accountId);
-  if (!account) return { ok: false, error: 'Account not found' };
-  const previousCredential = readAntigravityCredential(accountId);
-  if (!removeAntigravityCredential(accountId)) return { ok: false, error: 'Could not remove stored credential' };
-  settings.antigravityManagedAccounts = accounts.filter((entry) => entry.id !== accountId);
-  try {
-    saveSettings({ throwOnError: true });
-  } catch (_) {
-    if (previousCredential) writeAntigravityCredential(accountId, previousCredential);
-    return { ok: false, error: 'Could not persist account removal' };
-  }
-  pushSettingsToRenderer();
-  sendAntigravityAccountsPush();
-  void queueLimitInvalidation({ provider: 'antigravity', accountId, accountKey: account.accountKey }, 'account-removed', {
-    clear: true,
-    refresh: false
-  });
-  return { ok: true, accounts: antigravityAccountsForRenderer() };
-}
-
-function setAntigravityManagedAccountEnabled(id, enabled) {
-  const accountId = String(id || '').trim();
-  const accounts = normalizeAntigravityManagedAccounts(settings?.antigravityManagedAccounts);
-  const account = accounts.find((entry) => entry.id === accountId);
-  if (!account) return { ok: false, error: 'Account not found' };
-  account.enabled = Boolean(enabled);
-  account.updatedAt = new Date().toISOString();
-  settings.antigravityManagedAccounts = accounts;
-  try {
-    saveSettings({ throwOnError: true });
-  } catch (_) {
-    return { ok: false, error: 'Could not persist account state' };
-  }
-  pushSettingsToRenderer();
-  sendAntigravityAccountsPush();
-  void queueLimitInvalidation({ provider: 'antigravity', accountId, accountKey: account.accountKey }, 'account-state', {
-    clear: !account.enabled,
-    refresh: account.enabled
-  });
-  return { ok: true, accounts: antigravityAccountsForRenderer() };
-}
-
-function normalizeMimoManagedAccounts(value) {
-  if (!Array.isArray(value)) return [];
-  const seen = new Set();
-  const accounts = [];
-  for (const account of value) {
-    if (!account || typeof account !== 'object') continue;
-    const id = String(account.id || '').trim();
-    const accountKey = String(account.accountKey || '').trim();
-    if (!id || !accountKey) continue;
-    if (seen.has(accountKey)) continue;
-    seen.add(accountKey);
-    accounts.push({
-      id,
-      accountKey,
-      accountEmail: String(account.accountEmail || '').trim().slice(0, 254),
-      accountLabel: String(account.accountLabel || '').trim(),
-      addedAt: account.addedAt || new Date().toISOString(),
-      updatedAt: account.updatedAt || account.addedAt || new Date().toISOString(),
-      enabled: account.enabled !== false
-    });
-  }
-  return accounts;
-}
-
-// Synthetic settings-row id for the session discovered from MiMo Desktop. It is
-// local UI state, not a provider id.
-const MIMO_DETECTED_ACCOUNT_ID = 'mimo-local-session';
-const detectedMimoAccountKey = createMimoAccountMetadataReader();
-
-// Settings lists a detected Desktop identity without retaining its credential.
-function mimoDetectedAccount() {
-  const accountKey = detectedMimoAccountKey();
-  if (!accountKey) return null;
-  return {
-    id: MIMO_DETECTED_ACCOUNT_ID,
-    accountKey,
-    accountEmail: '',
-    accountLabel: '',
-    enabled: true
-  };
-}
-
-function mimoAccountsForRenderer() {
-  const accounts = normalizeMimoManagedAccounts(settings?.mimoManagedAccounts).map(({
-    id, accountKey, accountEmail, accountLabel, addedAt, updatedAt, enabled
-  }) => ({ id, accountKey, accountEmail, accountLabel, addedAt, updatedAt, enabled }));
-  return withDetectedMimoAccount(accounts, mimoDetectedAccount());
-}
-
-// Every saved account is handed over, including one whose credential cannot be
-// read right now: the provider answers that account with its own not-configured
-// row, which keeps the failure on the account it belongs to. Dropping it here
-// instead used to leave the provider with no accounts at all, and a provider with
-// no accounts answers once for the whole lane — which cleared every other
-// account's row with it.
-function mimoManagedAccountsForCollector() {
-  return normalizeMimoManagedAccounts(settings?.mimoManagedAccounts).map((account) => ({
-    ...account,
-    cookieHeader: readMimoCredential(account.id)
-  }));
-}
-
-function legacyMimoCredentialPath(id) {
-  const digest = crypto.createHash('sha256').update(String(id || '')).digest('hex');
-  return path.join(app.getPath('userData'), 'mimo-credentials', `${digest}.cookie`);
-}
-
-function writeMimoCredential(id, value) {
-  const cookieHeader = normalizeMimoCookieHeader(value);
-  if (!cookieHeader) return false;
-  try {
-    return ensureCredentialStore().writeMimoCredential(id, cookieHeader);
-  } catch (_) {
-    return false;
-  }
-}
-
-function readMimoCredential(id) {
-  try {
-    return normalizeMimoCookieHeader(ensureCredentialStore().readMimoCredential(id));
-  } catch (_) {
-    return '';
-  }
-}
-
-function removeMimoCredential(id) {
-  try {
-    return ensureCredentialStore().removeMimoCredential(id);
-  } catch (_) {
-    return false;
-  }
-}
-
-async function addMimoManagedAccount(cookieValue) {
-  const accounts = normalizeMimoManagedAccounts(settings?.mimoManagedAccounts);
-  const result = createMimoManagedAccount(cookieValue, accounts);
-  if (!result.ok) return result;
-  const [validation] = await fetchMimoLimits({
-    mimoManagedAccounts: [result.account],
-    limitRefreshScope: { provider: 'mimo', accountKey: result.account.accountKey }
-  }, credentialProbeDeps());
-  if (validation?.status !== 'ok') {
-    const errorCode = validation?.status === 'unauthorized'
-      ? 'invalidCookie'
-      : validation?.status === 'sourceRateLimited' ? 'validationRateLimited' : 'validationUnavailable';
-    return { ok: false, errorCode };
-  }
-  result.account.accountEmail = String(validation.accountEmail || '').trim().slice(0, 254);
-  const previousCookie = readMimoCredential(result.account.id);
-  const credentialStored = writeMimoCredential(result.account.id, result.account.cookieHeader);
-  delete result.account.cookieHeader;
-  if (!credentialStored) return { ok: false, errorCode: 'credentialStorageUnavailable' };
-  settings.mimoManagedAccounts = normalizeMimoManagedAccounts([
-    ...accounts.filter((account) => account.accountKey !== result.account.accountKey),
-    result.account
-  ]);
-  try {
-    saveSettings({ throwOnError: true });
-  } catch (_) {
-    if (previousCookie) writeMimoCredential(result.account.id, previousCookie);
-    else removeMimoCredential(result.account.id);
-    return { ok: false, errorCode: 'credentialStorageUnavailable' };
-  }
-  pushSettingsToRenderer();
-  sendMimoAccountsPush();
-  void queueLimitInvalidation({
-    provider: 'mimo',
-    accountId: result.account.id,
-    accountKey: result.account.accountKey
-  }, 'account-added');
-  return { ok: true, accounts: mimoAccountsForRenderer() };
-}
-
-async function removeMimoManagedAccount(id) {
-  const accountId = String(id || '').trim();
-  const accounts = normalizeMimoManagedAccounts(settings.mimoManagedAccounts);
-  const account = accounts.find((entry) => entry.id === accountId);
-  if (!account) return { ok: false, error: 'Account not found' };
-  const previousCookie = readMimoCredential(accountId);
-  if (!removeMimoCredential(accountId)) return { ok: false, error: 'Could not remove stored credential' };
-  settings.mimoManagedAccounts = accounts.filter((entry) => entry.id !== accountId);
-  try {
-    saveSettings({ throwOnError: true });
-  } catch (_) {
-    if (previousCookie) writeMimoCredential(accountId, previousCookie);
-    return { ok: false, error: 'Could not persist account removal' };
-  }
-  pushSettingsToRenderer();
-  sendMimoAccountsPush();
-  void queueLimitInvalidation({ provider: 'mimo', accountId, accountKey: account.accountKey }, 'account-removed', {
-    clear: true,
-    refresh: false
-  });
-  return { ok: true, accounts: mimoAccountsForRenderer() };
-}
-
-function setMimoManagedAccountEnabled(id, enabled) {
-  const accountId = String(id || '').trim();
-  const accounts = normalizeMimoManagedAccounts(settings.mimoManagedAccounts);
-  const account = accounts.find((entry) => entry.id === accountId);
-  if (!account) return { ok: false, error: 'Account not found' };
-  account.enabled = Boolean(enabled);
-  account.updatedAt = new Date().toISOString();
-  settings.mimoManagedAccounts = accounts;
-  try {
-    saveSettings({ throwOnError: true });
-  } catch (_) {
-    return { ok: false, error: 'Could not persist account state' };
-  }
-  pushSettingsToRenderer();
-  sendMimoAccountsPush();
-  void queueLimitInvalidation({ provider: 'mimo', accountId, accountKey: account.accountKey }, 'account-state', {
-    clear: !account.enabled,
-    refresh: account.enabled
-  });
-  return { ok: true, accounts: mimoAccountsForRenderer() };
-}
-
-function codexManagedRoot() {
-  return path.join(app.getPath('userData'), 'managed-codex-homes');
-}
-
-function codexManagedHomePath(accountId) {
-  const resolvedRoot = path.resolve(codexManagedRoot());
-  const resolvedHome = path.resolve(resolvedRoot, String(accountId || ''));
-  if (resolvedHome === resolvedRoot) return '';
-  if (!resolvedHome.startsWith(`${resolvedRoot}${path.sep}`)) return '';
-  return resolvedHome;
-}
-
-function findExistingCodexAccount(accounts, identity) {
-  return accounts.find((account) => codexManagedAccountMatchesIdentity(account, identity));
-}
-
-function codexAccountId(identity, existing) {
-  if (existing?.id) return existing.id;
-  return `codex-${(identity.accountKey || hashAccountKey(identity.email)).replace(/^sha256:/, '').slice(0, 12)}`;
-}
-
-// Deletes a managed home only when it resolves under our managed root, mirroring
-// CodexBar's safe-delete guard so a bad record can never wipe an arbitrary path.
-async function removeManagedHomeIfSafe(homePath) {
-  if (!homePath) return;
-  const resolvedHome = path.resolve(homePath);
-  const resolvedRoot = path.resolve(codexManagedRoot());
-  if (resolvedHome === resolvedRoot) return;
-  if (!resolvedHome.startsWith(`${resolvedRoot}${path.sep}`)) return;
-  await fs.promises.rm(resolvedHome, { recursive: true, force: true });
-}
-
-// Records a managed account for the auth that already lives in `homePath`, then
-// reloads the collector so the new account's limits show up immediately.
-function commitCodexManagedAccount(identity, homePath, existing, options = {}) {
-  const now = new Date().toISOString();
-  const id = codexAccountId(identity, existing);
-  const accounts = normalizeCodexManagedAccounts(settings.codexManagedAccounts);
-  const record = {
-    id,
-    email: identity.email,
-    accountKey: identity.accountKey || hashAccountKey(identity.email || id),
-    accountLabel: identity.accountLabel,
-    workspaceAccountId: identity.workspaceAccountId || identity.providerAccountId || '',
-    workspaceLabel: String(identity.workspaceLabel || '').trim(),
-    workspaceKind: identity.workspaceKind === 'personal' ? 'personal' : '',
-    homePath,
-    authPath: path.join(homePath, 'auth.json'),
-    addedAt: existing?.addedAt || now,
-    updatedAt: now,
-    enabled: options.enabled ?? true
-  };
-  settings.codexManagedAccounts = normalizeCodexManagedAccounts([
-    ...accounts.filter((account) => account.id !== id),
-    record
-  ]);
-  if (options.persist !== false) saveSettings({ throwOnError: true });
-  return codexAccountsForRenderer().find((account) => account.id === id);
-}
-
-function hasCodexIdentity(identity) {
-  return Boolean(identity?.accountKey || identity?.email);
-}
-
-async function snapshotCodexAuthFile(authPath) {
-  let parentExisted = true;
-  try { await fs.promises.stat(path.dirname(authPath)); } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
-    parentExisted = false;
-  }
-  try {
-    return { authPath, data: await fs.promises.readFile(authPath, 'utf8'), existed: true, parentExisted };
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
-    return { authPath, data: '', existed: false, parentExisted };
-  }
-}
-
-async function restoreCodexAuthFileSnapshot(snapshot, options = {}) {
-  if (snapshot.existed) {
-    await writeCodexAuthFile(snapshot.authPath, snapshot.data);
-    return;
-  }
-  await fs.promises.rm(snapshot.authPath, { force: true });
-  if (options.removeNewParent && !snapshot.parentExisted) {
-    await removeManagedHomeIfSafe(path.dirname(snapshot.authPath));
-  }
-}
-
-async function preserveLiveCodexAuthAsManagedAccount(targetIdentity) {
-  let liveMaterial;
-  try {
-    liveMaterial = await readCodexAuthMaterial(liveCodexAuthPath(process.env));
-  } catch (error) {
-    if (error?.code !== 'ENOENT') console.warn('Could not read live Codex auth before switching accounts:', error?.message || error);
-    return null;
-  }
-  if (!hasCodexIdentity(liveMaterial.identity)) return null;
-  if (codexAccountMatchesIdentity(targetIdentity, liveMaterial.identity)) return null;
-  const accounts = normalizeCodexManagedAccounts(settings.codexManagedAccounts);
-  const existing = findExistingCodexAccount(accounts, liveMaterial.identity);
-  const homePath = codexManagedHomePath(codexAccountId(liveMaterial.identity, existing));
-  if (!homePath) return null;
-  const authSnapshot = await snapshotCodexAuthFile(path.join(homePath, 'auth.json'));
-  try {
-    await writeCodexAuthFile(authSnapshot.authPath, liveMaterial.data);
-    const account = commitCodexManagedAccount(liveMaterial.identity, homePath, existing, {
-      enabled: existing?.enabled ?? true,
-      persist: false,
-      restart: false
-    });
-    return {
-      account,
-      rollback: () => restoreCodexAuthFileSnapshot(authSnapshot, { removeNewParent: true })
-    };
-  } catch (error) {
-    await restoreCodexAuthFileSnapshot(authSnapshot, { removeNewParent: true }).catch(() => {});
-    throw error;
-  }
-}
-
-function codexLoginErrorMessage(result) {
-  const detail = result.output ? `\n\n${result.output}` : '';
-  switch (result.outcome) {
-    case 'missingBinary':
-      return 'Codex CLI not found. Install Codex, then try again.';
-    case 'launchFailed':
-      return `Could not start codex login.${detail}`;
-    case 'timedOut':
-      return `Sign-in timed out. Finish the browser login, then try again.${detail}`;
-    case 'cancelled':
-      return 'Sign-in cancelled.';
-    default:
-      return `codex login failed.${detail}`;
-  }
-}
-
-function cancelledCodexLoginResult() {
-  return {
-    ok: false,
-    error: codexLoginErrorMessage({ outcome: 'cancelled' }),
-    outcome: 'cancelled'
-  };
-}
-
-async function rollbackCodexManagedHome(homePath, backupHomePath, movedToFinal) {
-  if (movedToFinal) await removeManagedHomeIfSafe(homePath);
-  if (backupHomePath) await fs.promises.rename(backupHomePath, homePath);
-}
-
-async function resolveCodexWorkspaceAfterLogin(auth, _homePath, options = {}) {
-  const initialIdentity = codexAuthIdentity(auth);
-  let workspaces;
-  try {
-    workspaces = await listCodexWorkspaces(auth, electronProviderDeps({
-      env: process.env,
-      signal: options.signal
-    }));
-  } catch (error) {
-    if (options.signal?.aborted) return { cancelled: true };
-    console.warn('Could not list Codex workspaces after sign-in:', error?.message || error);
-    return { auth, identity: initialIdentity };
-  }
-  if (options.signal?.aborted) return { cancelled: true };
-  if (workspaces.length === 0) return { auth, identity: initialIdentity };
-
-  const currentWorkspaceId = normalizeWorkspaceId(initialIdentity.workspaceAccountId);
-  let selected;
-  if (workspaces.length === 1) {
-    selected = workspaces[0];
-  } else if (typeof options.selectWorkspace === 'function') {
-    const selectedId = normalizeWorkspaceId(await options.selectWorkspace({
-      email: initialIdentity.email,
-      currentWorkspaceId,
-      workspaces
-    }));
-    if (!selectedId || options.signal?.aborted) return { cancelled: true };
-    selected = workspaces.find((workspace) => workspace.id === selectedId) || null;
-    if (!selected) throw new Error('The selected Codex workspace is no longer available.');
-  } else {
-    selected = workspaces.find((workspace) => workspace.id === currentWorkspaceId) || null;
-  }
-  if (!selected) return { auth, identity: initialIdentity };
-
-  const workspaceAccountId = normalizeWorkspaceId(selected.id);
-  return {
-    auth,
-    identity: {
-      ...initialIdentity,
-      providerAccountId: workspaceAccountId,
-      workspaceAccountId,
-      accountKey: codexAccountKey(initialIdentity.email, workspaceAccountId),
-      workspaceLabel: selected.label,
-      workspaceKind: selected.workspaceKind
-    }
-  };
-}
-
-// Best practice: each account gets its own OAuth grant via an isolated
-// `codex login` (CodexBar/tokscale model), so it never shares a refresh-token
-// lineage with the user's live Codex CLI login.
-async function addCodexManagedAccount(onOutput, options = {}) {
-  await fs.promises.mkdir(codexManagedRoot(), { recursive: true });
-  const tempHome = path.join(codexManagedRoot(), `pending-${crypto.randomUUID()}`);
-  await fs.promises.mkdir(tempHome, { recursive: true });
-  let backupHomePath = '';
-  let movedToFinal = false;
-  let accountCommitted = false;
-  try {
-    const result = await runCodexLogin({ homePath: tempHome, onOutput, signal: options.signal }, { env: process.env });
-    if (result.outcome !== 'success') {
-      return { ok: false, error: codexLoginErrorMessage(result), outcome: result.outcome };
-    }
-    if (options.signal?.aborted) return cancelledCodexLoginResult();
-    let auth;
-    try {
-      auth = JSON.parse(await fs.promises.readFile(path.join(tempHome, 'auth.json'), 'utf8'));
-    } catch (_) {
-      return { ok: false, error: 'Sign-in finished but no Codex credentials were written.' };
-    }
-    const workspaceResult = await resolveCodexWorkspaceAfterLogin(auth, tempHome, options);
-    if (workspaceResult.cancelled) return cancelledCodexLoginResult();
-    auth = workspaceResult.auth;
-    const identity = workspaceResult.identity;
-    if (!identity.accountKey && !identity.email) {
-      return { ok: false, error: 'Could not identify the Codex account after sign-in.' };
-    }
-    if (options.signal?.aborted) return cancelledCodexLoginResult();
-    const existing = findExistingCodexAccount(normalizeCodexManagedAccounts(settings.codexManagedAccounts), identity);
-    const homePath = codexManagedHomePath(codexAccountId(identity, existing));
-    if (!homePath) return { ok: false, error: 'The saved Codex account path is invalid.' };
-    if (path.resolve(homePath) !== path.resolve(tempHome)) {
-      if (options.signal?.aborted) return cancelledCodexLoginResult();
-      const candidateBackupPath = `${homePath}.backup-${crypto.randomUUID()}`;
-      try {
-        await fs.promises.rename(homePath, candidateBackupPath);
-        backupHomePath = candidateBackupPath;
-      } catch (error) {
-        if (error?.code !== 'ENOENT') throw error;
-      }
-      if (options.signal?.aborted) {
-        await rollbackCodexManagedHome(homePath, backupHomePath, movedToFinal);
-        backupHomePath = '';
-        return cancelledCodexLoginResult();
-      }
-      try {
-        await fs.promises.rename(tempHome, homePath);
-        movedToFinal = true;
-      } catch (error) {
-        await rollbackCodexManagedHome(homePath, backupHomePath, movedToFinal);
-        backupHomePath = '';
-        throw error;
-      }
-      if (options.signal?.aborted) {
-        await rollbackCodexManagedHome(homePath, backupHomePath, movedToFinal);
-        backupHomePath = '';
-        movedToFinal = false;
-        return cancelledCodexLoginResult();
-      }
-    }
-    if (options.signal?.aborted) {
-      await rollbackCodexManagedHome(homePath, backupHomePath, movedToFinal);
-      backupHomePath = '';
-      movedToFinal = false;
-      return cancelledCodexLoginResult();
-    }
-    const previousAccounts = settings.codexManagedAccounts;
-    options.onCommit?.();
-    let account;
-    try {
-      account = commitCodexManagedAccount(identity, homePath, existing, { restart: false });
-      if (backupHomePath) {
-        await removeManagedHomeIfSafe(backupHomePath);
-        backupHomePath = '';
-      }
-      accountCommitted = true;
-    } catch (error) {
-      settings.codexManagedAccounts = previousAccounts;
-      try {
-        saveSettings();
-      } catch (rollbackError) {
-        console.warn('Could not restore Codex account settings:', rollbackError?.message || rollbackError);
-      }
-      await rollbackCodexManagedHome(homePath, backupHomePath, movedToFinal);
-      backupHomePath = '';
-      movedToFinal = false;
-      throw error;
-    }
-    void queueLimitInvalidation({
-      provider: 'codex',
-      accountId: account.id,
-      accountKey: account.accountKey || ''
-    }, 'account-added');
-    return { ok: true, account };
-  } finally {
-    if (!accountCommitted) await removeManagedHomeIfSafe(tempHome).catch(() => {});
-  }
-}
-
-async function removeCodexManagedAccount(id) {
-  const accountId = String(id || '').trim();
-  const accounts = normalizeCodexManagedAccounts(settings.codexManagedAccounts);
-  const account = accounts.find((entry) => entry.id === accountId);
-  if (!account) return { ok: false, error: 'Account not found' };
-  settings.codexManagedAccounts = accounts.filter((entry) => entry.id !== accountId);
-  try {
-    saveSettings({ throwOnError: true });
-  } catch (error) {
-    return { ok: false, error: error?.message || 'Could not persist account removal' };
-  }
-  await removeManagedHomeIfSafe(account.homePath);
-  void queueLimitInvalidation({ provider: 'codex', accountId, accountKey: account.accountKey || '' }, 'account-removed', {
-    clear: true,
-    refresh: false
-  });
-  return { ok: true, accounts: codexAccountsForRenderer() };
-}
-
-function setCodexManagedAccountEnabled(id, enabled) {
-  const accountId = String(id || '').trim();
-  const accounts = normalizeCodexManagedAccounts(settings.codexManagedAccounts);
-  const account = accounts.find((entry) => entry.id === accountId);
-  if (!account) return { ok: false, error: 'Account not found' };
-  account.enabled = Boolean(enabled);
-  settings.codexManagedAccounts = accounts;
-  try {
-    saveSettings({ throwOnError: true });
-  } catch (error) {
-    return { ok: false, error: error?.message || 'Could not persist account state' };
-  }
-  void queueLimitInvalidation({ provider: 'codex', accountId, accountKey: account.accountKey || '' }, 'account-state', {
-    clear: !account.enabled,
-    refresh: account.enabled
-  });
-  return { ok: true, accounts: codexAccountsForRenderer() };
-}
-
-async function performCodexSystemAccountSwitch(id) {
-  const accountId = String(id || '').trim();
-  const accounts = normalizeCodexManagedAccounts(settings.codexManagedAccounts);
-  const account = accounts.find((entry) => entry.id === accountId);
-  if (!account) return { ok: false, error: 'Account not found' };
-  if (account.enabled === false) return { ok: false, error: 'Account is disabled' };
-
-  let targetMaterial;
-  try {
-    targetMaterial = await readCodexAuthMaterial(account.authPath || path.join(account.homePath, 'auth.json'));
-  } catch (error) {
-    return { ok: false, error: `Could not read the selected Codex account credentials: ${error?.message || error}` };
-  }
-  if (!hasCodexIdentity(targetMaterial.identity)) {
-    return { ok: false, error: 'Could not identify the selected Codex account credentials.' };
-  }
-  let selectedMaterial;
-  try {
-    selectedMaterial = codexAuthMaterialForWorkspace(targetMaterial, account.workspaceAccountId);
-  } catch (error) {
-    return { ok: false, error: error?.message || 'Could not prepare the selected Codex workspace.' };
-  }
-  const targetIdentity = {
-    ...selectedMaterial.identity,
-    workspaceLabel: account.workspaceLabel,
-    workspaceKind: account.workspaceKind
-  };
-
-  const previousAccounts = normalizeCodexManagedAccounts(settings.codexManagedAccounts);
-  const liveAuthPath = liveCodexAuthPath(process.env);
-  let liveAuthSnapshot;
-  try {
-    liveAuthSnapshot = await snapshotCodexAuthFile(liveAuthPath);
-  } catch (error) {
-    return { ok: false, error: `Could not back up the local Codex account: ${error?.message || error}` };
-  }
-  let preservedLiveAccount = null;
-  try {
-    preservedLiveAccount = await preserveLiveCodexAuthAsManagedAccount(targetIdentity);
-    await writeCodexAuthFile(liveAuthPath, selectedMaterial.data);
-    const refreshedAccounts = normalizeCodexManagedAccounts(settings.codexManagedAccounts);
-    const refreshed = refreshedAccounts.find((entry) => entry.id === account.id) || account;
-    commitCodexManagedAccount(targetIdentity, refreshed.homePath, refreshed, {
-      enabled: refreshed.enabled !== false,
-      restart: false
-    });
-    const activeAccountId = codexAccountId(targetIdentity, refreshed);
-    const accountsForRenderer = codexAccountsForRenderer();
-    return {
-      ok: true,
-      activeAccountId,
-      activeAccount: accountsForRenderer.find((entry) => entry.id === activeAccountId) || null,
-      accounts: accountsForRenderer
-    };
-  } catch (error) {
-    settings.codexManagedAccounts = previousAccounts;
-    const rollbackErrors = [];
-    try { await restoreCodexAuthFileSnapshot(liveAuthSnapshot); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
-    try { await preservedLiveAccount?.rollback?.(); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
-    const rollbackDetail = rollbackErrors.length > 0
-      ? ` Rollback also failed: ${rollbackErrors.map((rollbackError) => rollbackError?.message || rollbackError).join('; ')}`
-      : '';
-    return { ok: false, error: `Could not switch the local Codex account: ${error?.message || error}.${rollbackDetail}` };
-  }
-}
-
-let codexSystemSwitchInFlight = false;
 
 function pushCodexActiveAccountToRenderer(account) {
   if (!account || !mainWindow || mainWindow.isDestroyed()) return;
@@ -2059,12 +1305,7 @@ function pushCodexActiveAccountToRenderer(account) {
 // locks keep each button tidy; this process-wide guard prevents two windows or
 // the tray from writing the live auth file at the same time.
 async function switchCodexSystemAccount(id) {
-  if (codexSystemSwitchInFlight) {
-    return { ok: false, error: 'A Codex account switch is already in progress.' };
-  }
-  codexSystemSwitchInFlight = true;
-  try {
-    const result = await performCodexSystemAccountSwitch(id);
+  return codexAccountService().switchSystemAccount(id, async result => {
     if (result?.ok) {
       // Publish the optimistic selection from the shared lane so the App,
       // Edge Dock and tray agree immediately regardless of which one initiated
@@ -2086,10 +1327,7 @@ async function switchCodexSystemAccount(id) {
           console.log(`[codex] post-switch refresh failed: ${error?.message || error}`);
         });
     }
-    return result;
-  } finally {
-    codexSystemSwitchInFlight = false;
-  }
+  });
 }
 
 // The Edge Dock uses the same shared switch lane as the App and tray. That lane
@@ -2104,51 +1342,24 @@ async function switchCodexAccountFromEdgeDock(accountId) {
   return result;
 }
 
-async function refreshCodexManagedAccountLimits(id, reason = 'account-refresh') {
-  const accountId = String(id || '').trim();
-  const accounts = normalizeCodexManagedAccounts(settings.codexManagedAccounts);
-  const account = accounts.find((entry) => entry.id === accountId);
-  if (!account) return { ok: false, error: 'Account not found' };
-  if (account.enabled === false) return { ok: false, error: 'Account is disabled' };
-  if (!deviceRuntimeHandle) return { ok: false, error: 'Limits runtime is not ready' };
-  try {
-    const result = await deviceRuntimeHandle.refreshLimits({
-      provider: 'codex',
-      accountId: account.id,
-      accountKey: account.accountKey || ''
-    }, reason);
-    const summary = result?.snapshot || deviceRuntimeHandle.getSnapshot()?.limits;
-    const providers = (summary?.providers || []).filter((provider) => {
-      if (provider?.provider !== 'codex') return false;
-      if (account.accountKey) return provider.accountKey === account.accountKey;
-      if (account.email) return String(provider.accountEmail || '').toLowerCase() === account.email;
-      return provider.sourceDetail === 'managed';
-    });
-    return {
-      ok: true,
-      providers
-    };
-  } catch (error) {
-    return { ok: false, error: `Could not refresh Codex account limits: ${error?.message || error}` };
-  }
-}
+function refreshCodexManagedAccountLimits(...args) { return codexAccountService().refreshCodexManagedAccountLimits(...args); }
 
 function migrateLimitProviders(value) {
   // Saved provider selections are user intent. Normalize ids, but do not expand
   // older defaults into today's full provider list because the saved shape is
   // indistinguishable from a deliberate "only these providers" choice.
-  return parseLimitProviders(value).join(',');
+  return require('./plugins/limits').desktopProviderPreference(value, parseLimitProviders);
 }
 
 function migrateLimitProviderOrder(value) {
-  return parseLimitProviders(value).join(',') || defaultLimitProviderOrder();
+  return require('./plugins/limits').desktopProviderPreference(value, parseLimitProviders) || defaultLimitProviderOrder();
 }
 
 function migrateHomeLimitProviderOrder(value) {
   const isEmpty = value === undefined || value === null || value === ''
     || (Array.isArray(value) && value.length === 0);
   if (isEmpty) return '';
-  const normalized = parseLimitProviders(value).join(',');
+  const normalized = require('./plugins/limits').desktopProviderPreference(value, parseLimitProviders);
   return normalized && normalized !== defaultLimitProviderOrder() ? normalized : '';
 }
 
@@ -2159,7 +1370,7 @@ function normalizeHiddenLimitProviders(value) {
   const hidden = [];
   for (const item of raw) {
     const id = String(item || '').trim().toLowerCase();
-    if (!known.has(id) || seen.has(id)) continue;
+    if ((!known.has(id) && !require('../shared/limits/providers').isPluginLimitModuleId(id)) || seen.has(id)) continue;
     seen.add(id);
     hidden.push(id);
   }
@@ -2224,6 +1435,7 @@ function normalizeLanguageSetting(value, fallback = 'auto') {
   if (lower === 'zh-tw' || lower.startsWith('zh-hant') || /-(tw|hk|mo)\b/i.test(raw)) return 'zh-TW';
   if (lower === 'zh-cn' || lower.startsWith('zh-hans') || /-(cn|sg|my)\b/i.test(raw)) return 'zh-CN';
   if (lower === 'pt' || lower.startsWith('pt-')) return 'pt-BR';
+  if (lower === 'es' || lower.startsWith('es-')) return 'es';
   return LANGUAGE_VALUES.has(raw) ? raw : fallback;
 }
 
@@ -2266,6 +1478,8 @@ let persistBoundsTimer = null;
 let floatingBubbleAutoCollapseTimer = null;
 const floatingBubbleState = { collapsed: false, side: null, collapsedBounds: null, expandedBounds: null, suppressNextCollapse: false, contentSize: null };
 let mainWindowChrome = { collapsedFloatingBubble: false };
+let mainWindowReplacementEpoch = 0;
+let mainWindowReplacementTask = Promise.resolve();
 
 function stopPersistBoundsTimer() {
   if (persistBoundsTimer) clearTimeout(persistBoundsTimer);
@@ -2418,7 +1632,6 @@ function collapseFloatingBubble(plan) {
       focus: false,
       waitForContent: settings.floatingBubbleContent !== 'icon'
     });
-    sendFloatingBubbleState();
     return true;
   }
   applyCollapsedFloatingBubbleLimits(collapsedBounds);
@@ -2474,7 +1687,6 @@ function expandFloatingBubble(options = {}) {
         inactive: options.focus === false
       });
       setTimeout(() => { floatingBubbleState.suppressNextCollapse = false; }, 300);
-      sendFloatingBubbleState();
       return true;
     }
     // Unlock, re-limit and resize in one helper rather than inline: the order
@@ -2552,6 +1764,10 @@ function persistBoundsSoon() {
         previousBubble.height === next.height) return;
       settings.floatingBubbleBounds = next;
     } else {
+      if (!canPositionWindow()) {
+        next.x = prev.x;
+        next.y = prev.y;
+      }
       if (prev.x === next.x && prev.y === next.y && prev.width === next.width && prev.height === next.height) return;
       settings.windowBounds = next;
     }
@@ -2613,7 +1829,30 @@ function loadCredentialSettings(saved) {
   try {
     const store = ensureCredentialStore();
     store.migrateLegacySettings(saved);
-    const stored = store.settingsCredentials();
+    // A failed slot migration leaves its source untouched; it must not hide
+    // every other provider's credentials for this session.
+    let stored;
+    try {
+      stored = migrateAccountSlots(store, saved, Date.now, process.env);
+    } catch (error) {
+      reportCredentialStorageError('could not move saved accounts into the account list', error);
+      stored = store.settingsCredentials();
+    }
+    // A destination with a matching ID can also be an import conflict.
+    // A matching copy and no remaining source credential prove cleanup.
+    const document = store.readDocument();
+    for (const provider of ['claude', 'antigravity', 'workbuddy']) {
+      const records = document.credentials.providers?.[provider]?.accounts || {};
+      const moved = new Map((stored[`${provider}AccountSlots`] || []).map(slot => [slot.owner?.metadata?.id, slot.owner?.metadata]));
+      saved[`${provider}ManagedAccounts`] = (saved[`${provider}ManagedAccounts`] || []).filter(account =>
+        Object.hasOwn(records, account.id) || !require('node:util').isDeepStrictEqual(moved.get(account.id), account));
+    }
+    openrouterSlotsMigrated = Number(document.migrations.accountSlots?.openrouter || 0) >= 1;
+    copilotSlotsMigrated = Number(document.migrations.accountSlots?.copilot || 0) >= 1;
+    for (const entry of LIMIT_PROVIDER_REGISTRY.filter(entry => entry.accountSlots)) {
+      for (const field of entry.fields.filter(field => field.kind === 'credential')) saved[field.key] = '';
+      delete saved[`${entry.id}DefaultAccountIdentity`];
+    }
     // Cleanup is intentionally independent from the migration marker. If the
     // first cleanup write fails after credentials.json was committed, retry on
     // every startup until no credential keys remain in settings.json.
@@ -2628,31 +1867,6 @@ function loadCredentialSettings(saved) {
   } catch (error) {
     reportCredentialStorageError('could not load credentials.json', error);
     return {};
-  }
-}
-
-function migrateLegacyMimoCredentialFiles(accounts) {
-  const entries = [];
-  for (const account of accounts || []) {
-    try {
-      const cookieHeader = normalizeMimoCookieHeader(readRegularFileNoFollow(legacyMimoCredentialPath(account.id), {
-        fs,
-        description: 'Legacy MiMo credential',
-        encoding: 'utf8'
-      }));
-      if (cookieHeader) entries.push({ id: account.id, cookieHeader });
-    } catch (_) {}
-  }
-  if (entries.length === 0) return;
-  try {
-    ensureCredentialStore().migrateLegacyMimoCredentials(entries);
-    for (const entry of entries) {
-      if (!readMimoCredential(entry.id)) continue;
-      try { fs.rmSync(legacyMimoCredentialPath(entry.id), { force: true }); } catch (_) {}
-    }
-    try { fs.rmdirSync(path.join(app.getPath('userData'), 'mimo-credentials')); } catch (_) {}
-  } catch (error) {
-    console.warn(`[credentials] Could not migrate MiMo credentials: ${error.message}`);
   }
 }
 
@@ -2677,7 +1891,10 @@ function readSettings() {
     const storedCredentials = loadCredentialSettings(saved);
     if (!saved.secret && defaults.secret) delete saved.secret;
     const merged = { ...defaults, ...saved, ...storedCredentials };
+    Object.assign(merged, initializeHubProfiles(merged));
+    merged.limitAccountPresentation = normalizeAccountPresentation(merged.limitAccountPresentation);
     merged.clients = clientsCsvForSetting(merged.clients);
+    merged.separateQoderClients = parseBoolean(merged.separateQoderClients, false);
     // A client identity split (see clientIdentitySplits.js) is not a new tool:
     // the user tracking its parent was already counting it, so the split has to
     // be seeded or their usage drops. `seededClientSplits` makes that a one-time
@@ -2748,8 +1965,10 @@ function readSettings() {
     merged.homeModuleCounts = normalizeHomeModuleCounts(merged.homeModuleCounts);
     merged.homeLimitDisplayMode = normalizeHomeLimitDisplayMode(merged.homeLimitDisplayMode);
     merged.showHomeLimitProviderNames = parseBoolean(merged.showHomeLimitProviderNames, false);
+    merged.claudeCliFallbackEnabled = parseBoolean(merged.claudeCliFallbackEnabled, true);
     merged.codexResetForecastEnabled = parseBoolean(merged.codexResetForecastEnabled, false);
     merged.workbuddyQuotaTotalEnabled = parseBoolean(merged.workbuddyQuotaTotalEnabled, false);
+    merged.limitsHistoryOpenMode = ['hover', 'click', 'off'].includes(merged.limitsHistoryOpenMode) ? merged.limitsHistoryOpenMode : 'hover';
     merged.showCodexAdditionalLimits = parseBoolean(merged.showCodexAdditionalLimits, true);
     merged.opencodeLocalLimitsEnabled = parseBoolean(merged.opencodeLocalLimitsEnabled, false);
     delete merged.workbuddyLocalAppEnabled;
@@ -2775,7 +1994,7 @@ function readSettings() {
       merged.sessionUsageArchiveEnabled = parseBoolean(saved.sessionUsageArchiveEnabled, true);
     }
     if (saved.wslScanEnabled !== undefined) {
-      merged.wslScanEnabled = parseBoolean(saved.wslScanEnabled, true);
+      merged.wslScanEnabled = parseBoolean(saved.wslScanEnabled, false);
     }
     merged.codexDotsEnabled = parseBoolean(merged.codexDotsEnabled, false);
     merged.codexDotsVisible = parseBoolean(merged.codexDotsVisible, true);
@@ -2785,6 +2004,7 @@ function readSettings() {
     merged.heatmapMetric = normalizeHeatmapMetric(merged.heatmapMetric);
     merged.modelRankingMetric = normalizeRankingMetric(merged.modelRankingMetric);
     merged.homeActiveDaysWindow = normalizeHomeActiveDaysWindow(merged.homeActiveDaysWindow);
+    merged.showExactHomeTrendTokens = parseBoolean(merged.showExactHomeTrendTokens, false);
     merged.sessionTitlesEnabled = parseBoolean(merged.sessionTitlesEnabled, true);
     merged.sessionContextMetric = normalizeSessionContextMetric(merged.sessionContextMetric);
     merged.reduceMotion = motionPreferenceApi.normalize(merged.reduceMotion);
@@ -2871,6 +2091,8 @@ function readSettings() {
     merged.edgeDockWarnColors = parseBoolean(merged.edgeDockWarnColors, false);
     merged.edgeDockMacBackdrop = normalizeEdgeDockBackdropMode(merged.edgeDockMacBackdrop);
     merged.edgeDockWindowsBackdrop = normalizeWindowsDockBackdropMode(merged.edgeDockWindowsBackdrop);
+    merged.edgeDockBubbleSize = normalizeEdgeDockBubbleSize(merged.edgeDockBubbleSize);
+    merged.edgeDockBubbleCustomScale = normalizeEdgeDockCustomScale(merged.edgeDockBubbleCustomScale);
     merged.edgeDockSize = normalizeEdgeDockSize(merged.edgeDockSize);
     merged.edgeDockCustomScale = normalizeEdgeDockCustomScale(merged.edgeDockCustomScale);
     merged.edgeDockItems = normalizeEdgeDockItems(merged.edgeDockItems);
@@ -2991,8 +2213,9 @@ function removedTrackedClients(previousClients, nextClients) {
   return Array.from(previous).filter((client) => !next.has(client));
 }
 
-function localArchiveSourceDevice() {
+function localDeviceRecord({ forClientArchive = false } = {}) {
   return selectLocalDeviceRecord({
+    forClientArchive,
     deviceId: settings?.deviceId || defaultDeviceId(),
     externalAgentActive: isExternalAgentActive(),
     hubMode: settings?.hubMode,
@@ -3003,11 +2226,29 @@ function localArchiveSourceDevice() {
   });
 }
 
+function assertClientArchiveCaptureReady(nextClients, sessionUsageArchiveEnabled) {
+  const deviceId = settings?.deviceId || defaultDeviceId();
+  if (mode !== 'sync' || lastCollectedDevice?.deviceId === deviceId
+    || !sessionUsageArchiveEnabled
+    || (isExternalAgentActive() && settings?.hubMode !== 'icloud')
+    || !removedTrackedClients(settings?.clients, nextClients).length) return;
+
+  // A Hub snapshot can arrive before the first full collection. Its aggregate
+  // has no lifetime session IDs to reconcile against the SQLite archive.
+  if (localDeviceRecord()) throw new Error('tracking-scan-pending');
+}
+
 function updateArchivedClientUsage(previousClients, nextClients) {
   const removedClients = removedTrackedClients(previousClients, nextClients);
   let archive = pruneArchivedClientUsage(settings.archivedClientUsage, nextClients);
   if (removedClients.length > 0) {
-    archive = captureArchivedClientUsage(archive, localArchiveSourceDevice(), removedClients);
+    // Before this run's first complete record, localDevice may be a first-scan
+    // preview whose unscanned windows would archive as zero. Only the seed, or
+    // nothing, stands for the client then.
+    const source = mode === 'local' && !lastCollectedDevice
+      ? anchorSeedDevice
+      : localDeviceRecord({ forClientArchive: settings.sessionUsageArchiveEnabled !== false });
+    archive = captureArchivedClientUsage(archive, source, removedClients);
   }
   settings.archivedClientUsage = archive;
 }
@@ -3175,8 +2416,9 @@ function nativeMaterialOptions(source = settings, dashboard = false) {
 function applyNativeMaterial(source = settings) {
   syncNativeMaterialVisibility(mainWindow, nativeMaterialOptions(source));
   syncNativeMaterialVisibility(dashboardWindow, nativeMaterialOptions(source, true));
-  // Windows' material is still construction-time; its existing rebuild path
-  // handles setting changes. The macOS manager avoids recreating stable views.
+  syncWindowsBackdrop(mainWindow, { enabled: nativeBlurEnabled(source), mode: source.windowsBackdrop });
+  syncWindowsBackdrop(dashboardWindow, { enabled: nativeBlurEnabled(source) });
+  limitsHistoryController?.syncMaterial();
 }
 
 function withHistoryPreview(stats, devices) {
@@ -3208,19 +2450,98 @@ const usageRuntimeReconciler = createLatestWinsReconciler({
 });
 let localDevice = null;
 let localStats = null;
+// The cold-start seed as projected, kept until this run's first complete record
+// so each preview of the first scan is laid over it rather than over the last.
+let anchorSeedDevice = null;
 let sseAbortController = null;
 let sseRetryTimer = null;
 let streamConnected = false;
 let streamFailure = null;
 let lastCollectedDevice = null;
+// Before the first scan, the cold-start seed already carries the replayed archive.
+const localArchivedSessionCount = createLocalArchivedSessionCounter(() => lastCollectedDevice || anchorSeedDevice);
 let latestHubStats = null;
 let latestHubStatsReceivedAt = null;
+// Matches the renderer's connected-stream fallback interval.
+const HUB_STREAM_CACHE_FRESH_MS = 5 * 60 * 1000;
 let latestHubStatsSource = 'none';
 let latestHubStatsGeneration = null;
 let latestHubStatsIdentity = null;
 let hubModeGeneration = 0;
 let tray = null;
 let latestStats = null;
+let limitsHistoryStore = null;
+let limitsHistoryController = null;
+
+function getLimitsHistoryStore() {
+  if (!limitsHistoryStore) limitsHistoryStore = createLimitsHistoryStore(path.join(app.getPath('userData'), 'limits-history.sqlite'), {
+    onError: error => console.log(`[limits-history] ${error.message}`),
+    onChange: () => limitsHistoryController?.refresh(),
+    legacyScopes: () => {
+      const urls = [...new Set(['none',
+        effectiveHubConfig({ ...settings, hubMode: 'client' }).url,
+        effectiveHubConfig({ ...settings, hubMode: 'host' }).url
+      ].filter(Boolean).map(url => String(url).replace(/\/$/, '')))];
+      return ['local', 'client', 'host', 'icloud'].flatMap(mode => urls.map(url => `${mode}|${url}`));
+    }
+  });
+  return limitsHistoryStore;
+}
+
+async function limitsHistoryPayload(key) {
+  if (statsPushSource && (statsPushSource.generation !== hubModeGeneration
+    || statsPushSource.identity !== currentHubStatsIdentity())) return null;
+  const publication = latestStats;
+  const stats = electronPresentationStats(publication);
+  const provider = stats?.limits?.providers?.find(row => historyRowKey(row) === key);
+  if (!provider) return null;
+  const scope = currentHubStatsIdentity();
+  const history = await getLimitsHistoryStore().query(scope, provider);
+  // Activity-only publications retain the quota snapshot and do not invalidate this read.
+  if (scope !== currentHubStatsIdentity()) return null;
+  // A newer quota publication will trigger its own history refresh. Keep the
+  // current card visible while discarding this superseded query.
+  if (publication?.limits !== latestStats?.limits) {
+    const stillPresent = electronPresentationStats(latestStats)?.limits?.providers?.some(row => historyRowKey(row) === key);
+    return stillPresent ? undefined : null;
+  }
+  history.windows = history.windows.filter(entry => !historyWindowHidden(settings?.limitProviderHiddenItems, provider.provider, entry.window)
+    && !(provider.provider === 'codex' && settings?.showCodexAdditionalLimits === false && entry.window.additional === true));
+  if (!history.windows.length) return null;
+  const slots = accountSlotService?.list(provider.provider).accounts || [];
+  const [presented] = applyAccountOrder([provider], { [provider.provider]: slots }, settings?.deviceId, settings?.limitAccountPresentation);
+  const email = provider.accountEmail || '';
+  const account = settings?.maskLimitAccountEmails === true
+    ? historyMaskEmail(email) : email;
+  const colorId = provider.provider === 'factory' ? 'droid' : provider.provider;
+  const palette = { ...historyVendorColors(), ...settings?.vendorColors };
+  return {
+    ...history, key,
+    source: crypto.createHash('sha256').update(scope).digest('hex'),
+    provider: provider.provider,
+    label: historyProviderCatalog.find(entry => entry.id === provider.provider)?.label || provider.provider,
+    account: presented.accountDisplayName || account || provider.accountName || provider.accountLabel || '',
+    updatedAt: provider.updatedAt,
+    locale: trayMenuLocale(), colors: settings?.themeColors, textScale: fontSettingsApi.textScaleForSize(settings?.textSize),
+    color: palette[colorId] || palette.default,
+    interfaceFont: fontSettingsApi.resolveEffectiveFontSettings(settings).interfaceFont,
+    appearance: {
+      glassOpacity: settings.glassOpacity, glassBlur: settings.glassBlur, systemGlass: settings.systemGlass, reduceMotion: settings.reduceMotion,
+      systemReducedMotion: systemPreferences.getAnimationSettings?.().prefersReducedMotion === true,
+    }
+  };
+}
+
+function getLimitsHistoryController() {
+  if (!limitsHistoryController) limitsHistoryController = createLimitsHistoryController({
+    BrowserWindow, screen, ipcMain,
+    isOwner: win => win === mainWindow || win === dashboardWindow,
+    read: limitsHistoryPayload,
+    getOpenMode: () => settings.limitsHistoryOpenMode,
+    getMaterialOptions: () => ({ ...nativeMaterialOptions(), windowsBackdrop: settings.windowsBackdrop, radius: 14 })
+  });
+  return limitsHistoryController;
+}
 let statsPushSource = null;
 let statsPushRevision = 0;
 let macWidgetSnapshotController = null;
@@ -3382,7 +2703,7 @@ const diagnosticSnapshotBuilder = createDiagnosticSnapshotBuilder({
   getLatestHubStatsIdentity: () => latestHubStatsIdentity,
   getHubModeGeneration: () => hubModeGeneration,
   getCurrentHubStatsIdentity: (hubMode) => currentHubStatsIdentity(hubMode),
-  getLocalRecord: localArchiveSourceDevice,
+  getLocalRecord: localDeviceRecord,
   getTokscaleStatus,
   getConfiguration: () => diagnosticConfigurationFromSettings(settings || {}, {
     usage: {
@@ -3450,17 +2771,26 @@ function limitInvalidationKey(scope) {
     || scope?.accountLabel
     || ''
   ).trim();
-  return account ? `${provider}:${account}` : `${provider}:*`;
+  if (account) return `${provider}:${account}`;
+  return provider === 'minimax' && scope?.source === 'api' ? `${provider}:source:api` : `${provider}:*`;
 }
 
 function rememberPendingLimitInvalidation(scope, reason, options = {}) {
-  const clear = options.clear === true;
   const refresh = options.refresh !== false;
   const normalized = { ...scope, provider: String(scope?.provider || '').trim().toLowerCase() };
   const key = limitInvalidationKey(normalized);
+  const broad = pendingLimitInvalidations.get(`${normalized.provider}:*`);
+  if (normalized.provider === 'minimax' && normalized.source === 'api' && broad?.clear) {
+    broad.refresh ||= refresh;
+    return;
+  }
+  let clear = options.clear === true || pendingLimitInvalidations.get(key)?.clear === true;
   if (key.endsWith(':*')) {
     for (const pendingKey of pendingLimitInvalidations.keys()) {
-      if (pendingKey.startsWith(`${normalized.provider}:`)) pendingLimitInvalidations.delete(pendingKey);
+      if (pendingKey.startsWith(`${normalized.provider}:`)) {
+        clear = clear || pendingLimitInvalidations.get(pendingKey).clear;
+        pendingLimitInvalidations.delete(pendingKey);
+      }
     }
   }
   pendingLimitInvalidations.set(key, { scope: normalized, reason, clear, refresh });
@@ -3742,9 +3072,91 @@ function syncContentContext(sourceSettings = settings) {
   return { ...endpoint, mode: sourceSettings?.hubMode, deviceId: sourceSettings?.deviceId || defaultDeviceId() };
 }
 
+async function requestSyncContent(context, pathname, method, body) {
+  // The embedded Hub uses the same authenticated protocol in-process. Its
+  // own usage must keep working when outbound loopback traffic is blocked.
+  if (context.mode === 'host' && embeddedHub
+    && ((context.url === `http://127.0.0.1:${embeddedHub.port}` && context.secret === embeddedHub.secret)
+      // Every embedded host generation shares this app's hubDataFile. Old
+      // host journals may scrub that same store after port/secret rotation;
+      // they cannot read or admit a new generation through this exception.
+      || (method === 'PUT' && /^\/api\/sync\/titles\//.test(pathname) && body?.enabled === false))) {
+    const hub = embeddedHub.hub;
+    try {
+      if (pathname === '/api/sync/content') return { status: 200, body: hub.getSyncContent() };
+      const match = pathname.match(/^\/api\/sync\/settings\/(modelAliases|customPricing|limitAccountPresentation)$/);
+      if (match) return { status: 200, body: { ok: true, ...(method === 'PUT'
+        ? hub.setSyncSettings(match[1], body) : hub.getSyncSettings(match[1])) } };
+      const titleMatch = pathname.match(/^\/api\/sync\/titles\/([^/]+)$/);
+      if (titleMatch && method === 'PUT') return { status: 200,
+        body: { ok: true, ...hub.setSyncTitlePolicy(decodeURIComponent(titleMatch[1]), body.enabled) } };
+      return { status: 404, body: null };
+    } catch (error) {
+      return { status: error.code === 'stale_write' ? 409 : error.code === 'forbidden' ? 403 : 400,
+        body: error.current || null };
+    }
+  }
+  const response = await fetch(`${context.url.replace(/\/$/, '')}${pathname}`, {
+    method, redirect: 'error',
+    headers: { 'content-type': 'application/json', ...(context.secret ? { authorization: `Bearer ${context.secret}` } : {}) },
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    signal: AbortSignal.timeout(15_000)
+  });
+  let data;
+  try { data = await response.json(); } catch (_) { data = null; }
+  return { status: response.status, body: data };
+
+}
+
+let syncContentCredentials;
+// Destination bindings stay in CredentialStore; preferences contain only opaque IDs.
+function getSyncContentCredentials() {
+  return syncContentCredentials ||= createSyncContentCredentialQueue(ensureCredentialStore);
+}
+
+const { createAccountPresentationSync } = require('./limits/accountPresentationSync');
+let accountPresentationSync;
+function getAccountPresentationSync() {
+  return accountPresentationSync ||= createAccountPresentationSync({
+    getContext: syncContentContext,
+    identity: (context) => {
+      try { return getSyncContentCredentials().resolvePresentationIdentity(context); } catch (_) { return ''; }
+    },
+    getCacheIdentity: () => settings.limitAccountPresentationCacheIdentity || '',
+    loadJournal: () => (Array.isArray(settings.limitAccountPresentationPending) ? settings.limitAccountPresentationPending : []),
+    saveJournal: (journal) => {
+      settings = { ...settings, limitAccountPresentationPending: journal };
+      saveSettings({ throwOnError: true });
+    },
+    getLocalLabels: () => LIMIT_PROVIDER_REGISTRY.filter(entry => entry.accountSlots).flatMap(entry =>
+      accountSlotService?.localLabels(entry.id) || []),
+    getSeed: () => {
+      const seed = structuredClone(settings.limitAccountPresentation || {});
+      for (const entry of LIMIT_PROVIDER_REGISTRY.filter(entry => entry.accountSlots)) {
+        const accounts = accountSlotService?.list(entry.id).accounts || [];
+        if (!accounts.length) continue;
+        const group = seed[entry.id] ||= { labels: {}, order: [] };
+        for (const slot of accounts) {
+          const key = slot.presentationKey || slot.accountKey;
+          if (slot.label && !Object.hasOwn(group.labels, key)) group.labels[key] = slot.label;
+        }
+        group.order = [...new Set([...group.order, ...accounts.map(slot => slot.presentationKey || slot.accountKey)])];
+      }
+      return normalizeSharedSyncValue('limitAccountPresentation', normalizeAccountPresentation(seed));
+    },
+    request: requestSyncContent,
+    apply: (value, identity) => {
+      settings = { ...settings, limitAccountPresentation: value, limitAccountPresentationCacheIdentity: identity };
+      saveSettings({ throwOnError: true });
+      pushSettingsToRenderer();
+      void accountSlotService?.adoptSharedLabels(value);
+    }
+  });
+}
+
 function getSyncContentRuntime() {
   if (syncContentRuntime) return syncContentRuntime;
-  const cleanupCredentials = createSyncContentCredentialQueue(ensureCredentialStore);
+  const cleanupCredentials = getSyncContentCredentials();
   syncContentRuntime = createSyncContentRuntime({
     resolveIdentity: cleanupCredentials.resolveIdentity,
     loadCleanupContexts: cleanupCredentials.read,
@@ -3770,40 +3182,7 @@ function getSyncContentRuntime() {
       return applySyncSettingsPatch(kind === 'modelAliases' ? value : { customModelPricing: value });
     },
     normalizeValue: normalizeSharedSyncValue,
-    request: async (context, pathname, method, body) => {
-      // The embedded Hub uses the same authenticated protocol in-process. Its
-      // own usage must keep working when outbound loopback traffic is blocked.
-      if (context.mode === 'host' && embeddedHub
-        && ((context.url === `http://127.0.0.1:${embeddedHub.port}` && context.secret === embeddedHub.secret)
-          // Every embedded host generation shares this app's hubDataFile. Old
-          // host journals may scrub that same store after port/secret rotation;
-          // they cannot read or admit a new generation through this exception.
-          || (method === 'PUT' && /^\/api\/sync\/titles\//.test(pathname) && body?.enabled === false))) {
-        const hub = embeddedHub.hub;
-        try {
-          if (pathname === '/api/sync/content') return { status: 200, body: hub.getSyncContent() };
-          const match = pathname.match(/^\/api\/sync\/settings\/(modelAliases|customPricing)$/);
-          if (match) return { status: 200, body: { ok: true, ...(method === 'PUT'
-            ? hub.setSyncSettings(match[1], body) : hub.getSyncSettings(match[1])) } };
-          const titleMatch = pathname.match(/^\/api\/sync\/titles\/([^/]+)$/);
-          if (titleMatch && method === 'PUT') return { status: 200,
-            body: { ok: true, ...hub.setSyncTitlePolicy(decodeURIComponent(titleMatch[1]), body.enabled) } };
-          return { status: 404, body: null };
-        } catch (error) {
-          return { status: error.code === 'stale_write' ? 409 : error.code === 'forbidden' ? 403 : 400,
-            body: error.current || null };
-        }
-      }
-      const response = await fetch(`${context.url.replace(/\/$/, '')}${pathname}`, {
-        method, redirect: 'error',
-        headers: { 'content-type': 'application/json', ...(context.secret ? { authorization: `Bearer ${context.secret}` } : {}) },
-        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-        signal: AbortSignal.timeout(15_000)
-      });
-      let data;
-      try { data = await response.json(); } catch (_) { data = null; }
-      return { status: response.status, body: data };
-    },
+    request: requestSyncContent,
     onStatus: (status) => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         try { mainWindow.webContents.send('syncContent:push', status); } catch (_) {}
@@ -4422,6 +3801,8 @@ function stopSyncCollector(options = {}) {
   usageRuntimeReconciler.setActiveKey(null);
   if (deviceRuntimeHandle) { try { deviceRuntimeHandle.stop(options); } catch (_) {} }
   deviceRuntimeHandle = null;
+  // A stopped runtime's probes finish unobserved.
+  clearSettingsLimitState();
 }
 
 async function stopIcloudRuntime() {
@@ -4792,6 +4173,12 @@ function injectLocalDeviceStatus(stats) {
     const activity = localActivityPatch(lastCollectedDevice);
     if (activity) stats = projectLocalActivity(stats, activity);
   }
+  // Account disclosures and connection sources use per-device quota rows.
+  // Apply the aggregate freshness rule to those rows for every provider.
+  const now = Date.now();
+  for (const device of stats.devices) if (device.limits) device.limits = { ...device.limits, providers: device.limits.providers.map(row => ({
+    ...row, stale: isProviderStale(row, device.limits, device, stats.staleAfterMs, now)
+  })) };
   if (mode !== 'local') snapshotLocalDevices.set(stats, { localDevice: lastCollectedDevice });
   return stats;
 }
@@ -5069,7 +4456,10 @@ function sendPush(payload, options = {}) {
     }
     edgeDockManualStats = null;
     getSyncContentRuntime().notifyStats(latestStats);
+    getAccountPresentationSync().notifyStats(latestStats);
     const visibleStats = electronPresentationStats(latestStats);
+    getLimitsHistoryStore().record(currentHubStatsIdentity(), visibleStats.limits);
+    limitsHistoryController?.refresh();
     migrateCodexAdditionalLimits(visibleStats);
     rendererPayload = {
       ...payload,
@@ -5169,12 +4559,47 @@ function refreshTrayContextMenu() {
   if (typeof tray.refreshContextMenu === 'function') tray.refreshContextMenu();
 }
 
+function desktopQuotaStats(stats) {
+  const projected = require('./plugins/limitsPresentation').projectPluginLimits(stats, pluginRuntime?.limitsSnapshot());
+  if (!projected?.limits) return projected;
+  const slotLists = Object.fromEntries(LIMIT_PROVIDER_REGISTRY
+    .filter(entry => entry.accountSlots)
+    .map(entry => [entry.id, accountSlotService?.list(entry.id).accounts || []]));
+  return { ...projected, limits: { ...projected.limits,
+    providers: applyAccountOrder(projected.limits.providers || [], slotLists, settings.deviceId, settings.limitAccountPresentation) } };
+}
+
+function syncPluginQuotaSurfaceDemand() {
+  if (!pluginRuntime) return;
+  const trayNeeds = settings?.showTrayIcon !== false && (['limitsAllSessions', 'bars', 'barsSession', 'barsWeekly', 'barsAllSessions'].includes(settings?.trayContent)
+    || (settings?.trayContent === 'custom' && trayLayoutApi.usesLimits(settings?.trayCustomLayout)));
+  const dockNeeds = edgeDockController?.limitsVisible?.() && (settings.edgeDockItems === null || (settings.edgeDockItems || []).some(item => item.type === 'limit'));
+  const notch = notchController?.quotaVisibility?.();
+  const summaryMode = notchSummaryMode(settings);
+  const notchNeeds = notch?.panel || (notch?.summary && (summaryMode === 'auto'
+    || (['tray', 'custom'].includes(summaryMode) && trayLayoutApi.usesLimits(notchSummaryLayout(settings)))));
+  pluginRuntime.demandLimits(Boolean(settings?.limitsEnabled !== false && (trayNeeds || dockNeeds || notchNeeds)), 'desktop.native');
+}
+
+let pluginQuotaRepaintPending = false;
+function pluginQuotaChanged() {
+  if (pluginQuotaRepaintPending) return;
+  pluginQuotaRepaintPending = true;
+  setImmediate(() => {
+    pluginQuotaRepaintPending = false;
+    syncPluginQuotaSurfaceDemand();
+    repaintDockSurfaces();
+    updateTrayDisplay();
+  });
+}
+
 function updateTrayDisplay() {
   if (!tray || tray.isDestroyed()) return;
   // Keep the exported D-Bus menu in sync (radio checks, refresh state, Codex
   // accounts) — see the Linux note in createTray().
   refreshTrayContextMenu();
-  const visibleStats = electronPresentationStats(latestStats);
+  syncPluginQuotaSurfaceDemand();
+  const visibleStats = desktopQuotaStats(electronPresentationStats(latestStats));
   const mode = settings?.trayContent || 'tokens';
   const currency = normalizeCurrency(settings?.currency);
   const compactOptions = compactTokenDisplayOptions();
@@ -5241,8 +4666,11 @@ function stopLocalCollector(options = {}) {
   usageRuntimeReconciler.setActiveKey(null);
   if (deviceRuntimeHandle) { try { deviceRuntimeHandle.stop(options); } catch (_) {} }
   deviceRuntimeHandle = null;
+  // A stopped runtime's probes finish unobserved.
+  clearSettingsLimitState();
   localDevice = null;
   localStats = null;
+  anchorSeedDevice = null;
 }
 
 // Show the last full scan's totals while the first one of this run is still
@@ -5263,6 +4691,8 @@ function primeLocalStatsFromAnchor(usageOptions, widgetProducerOwner) {
       customScanPaths: usageOptions.customScanPaths,
       wslScanEnabled: usageOptions.wslScanEnabled,
       wslSupported: process.platform === 'win32',
+      historyEnabled: usageOptions.historyEnabled,
+      dailyHistoryArchiveEnabled: usageOptions.dailyHistoryArchiveEnabled,
       hostname: os.hostname(),
       platform: `${process.platform}-${process.arch}`
     }
@@ -5284,6 +4714,7 @@ function primeLocalStatsFromAnchor(usageOptions, widgetProducerOwner) {
     sendStatus(false, { reason: `session-archive:${error.message}` });
     return;
   }
+  anchorSeedDevice = visible;
   localDevice = visible;
   localStats = withHistoryPreview(aggregateDevices([visible], 0), [visible]);
   // Through the normal publisher, not straight to the renderer: the tray reads
@@ -5297,6 +4728,21 @@ function primeLocalStatsFromAnchor(usageOptions, widgetProducerOwner) {
     event: 'stats',
     data: { type: 'stats', reason: 'anchor', stats: localStats, at: deviceRecord.receivedAt }
   }, { skipExport: true, deferToRenderer: true, widgetProducerOwner });
+}
+
+// The first scan holds its record back until all-time is in, which on a long
+// history is minutes after Today was ready. Show each window as it lands, over
+// the seed's last known values when there is one. Display only: nothing here is
+// exported, because a record missing windows reads as zero wherever it lands.
+function publishColdPreview(preview, reason, widgetProducerOwner) {
+  if (lastCollectedDevice) return;
+  const device = seedWithColdPreview(anchorSeedDevice || preview, preview);
+  localDevice = device;
+  localStats = withHistoryPreview(aggregateDevices([device], 0), [device]);
+  sendPush({
+    event: 'stats',
+    data: { type: 'stats', reason, stats: localStats, at: new Date().toISOString() }
+  }, { skipExport: true, widgetProducerOwner });
 }
 
 function startLocalCollector() {
@@ -5316,7 +4762,9 @@ function startLocalCollector() {
     usageOptions,
     progressive: true,
     onSessionActivity: publishLocalSessionActivity,
+    onColdPreview: (preview, meta) => publishColdPreview(preview, meta.reason, widgetProducerOwner),
     onRecord: (summary, meta) => {
+      anchorSeedDevice = null;
       seedInitialLimitProviders(summary);
       const reason = meta.reason;
       const visibleSummary = summary;
@@ -5354,6 +4802,9 @@ function stopStatsStream() {
 
 async function startStatsStream(options = {}) {
   stopStatsStream();
+  // Legacy History needs reconciliation after reconnect. Negotiated uploads
+  // keep their independent baseline and recover through 409 if the Hub lost it.
+  postSyncPayload.resetHistory({ preserveDelta: !options.resetSnapshot });
   const generation = hubModeGeneration;
   const widgetProducerOwner = captureMacWidgetProducerOwner();
   if (settings?.hubMode !== 'client') return;
@@ -5367,7 +4818,21 @@ async function startStatsStream(options = {}) {
   const url = `${hubUrl.replace(/\/$/, '')}/api/stats/stream`;
   const controller = new AbortController();
   sseAbortController = controller;
+  let activityTimer = null;
+  let timedOut = false;
+  // Hubs send a heartbeat every 30s. Bound both opening the request and waiting
+  // for bytes, since a half-open connection may never report an error or EOF.
+  function armActivityTimeout(delayMs) {
+    clearTimeout(activityTimer);
+    activityTimer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, delayMs);
+    activityTimer.unref?.();
+  }
+  controller.signal.addEventListener('abort', () => clearTimeout(activityTimer), { once: true });
   try {
+    armActivityTimeout(15_000);
     const response = await fetch(url, {
       headers: {
         accept: 'text/event-stream',
@@ -5376,22 +4841,27 @@ async function startStatsStream(options = {}) {
       },
       signal: controller.signal
     });
-    if (!hubModeRequestIsCurrent(generation, 'client', cacheIdentity)) return;
+    if (controller !== sseAbortController || !hubModeRequestIsCurrent(generation, 'client', cacheIdentity)) return;
+    controller.signal.throwIfAborted();
     if (!response.ok || !response.body) {
       sendStatus(false, classifyStreamFailure({ status: response.status }));
       scheduleStreamRetry();
       return;
     }
+    armActivityTimeout(90_000);
     sendStatus(true);
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     const blocks = createSseBlockReader();
     const streamSnapshot = createStatsStreamReceiver();
     for (;;) {
-      if (!hubModeRequestIsCurrent(generation, 'client', cacheIdentity)) return;
+      if (controller !== sseAbortController || !hubModeRequestIsCurrent(generation, 'client', cacheIdentity)) return;
       const { value, done } = await reader.read();
-      if (!hubModeRequestIsCurrent(generation, 'client', cacheIdentity)) return;
+      if (controller !== sseAbortController || !hubModeRequestIsCurrent(generation, 'client', cacheIdentity)) return;
+      controller.signal.throwIfAborted();
       if (done) break;
+      // Count comments and partial frames too: large snapshots may span reads.
+      if (value.byteLength) armActivityTimeout(90_000);
       for (const block of blocks.push(decoder.decode(value, { stream: true }))) {
         const parsed = parseSseBlock(block);
         if (parsed) {
@@ -5409,14 +4879,17 @@ async function startStatsStream(options = {}) {
         }
       }
     }
-    if (!hubModeRequestIsCurrent(generation, 'client', cacheIdentity)) return;
+    if (controller !== sseAbortController || !hubModeRequestIsCurrent(generation, 'client', cacheIdentity)) return;
     sendStatus(false, classifyStreamFailure({ eof: true }));
     scheduleStreamRetry();
   } catch (error) {
-    if (controller.signal.aborted || !hubModeRequestIsCurrent(generation, 'client', cacheIdentity)) return;
-    controller.abort();
-    sendStatus(false, classifyStreamFailure({ errorCode: error?.cause?.code || error?.code, message: error?.message }));
+    if ((controller.signal.aborted && !timedOut) || controller !== sseAbortController
+      || !hubModeRequestIsCurrent(generation, 'client', cacheIdentity)) return;
+    sendStatus(false, classifyStreamFailure({ errorCode: timedOut ? 'ETIMEDOUT' : error?.cause?.code || error?.code, message: error?.message }));
     scheduleStreamRetry();
+  } finally {
+    clearTimeout(activityTimer);
+    controller.abort();
   }
 }
 
@@ -5485,89 +4958,6 @@ function currentWindowToggleShortcutStatus() {
 // Default-deny: name every field allowed through instead of spreading the stored
 // profile. A spread hands any field added later to the renderer verbatim, which
 // is exactly how a credential leaks.
-// Sub2API rotates its single-use refresh token on every renewal. Persist the
-// new pair with a compare-and-swap before the collector retries with it.
-// New profiles require a current access token and are never persisted from a
-// renewal callback while their save probe is still in flight.
-function persistThirdPartyCredentialsRenewal(renewal = {}) {
-  const accountName = String(renewal.accountName || '').trim();
-  const adapter = thirdPartyLimits.normalizeAdapterId(renewal.adapter);
-  const profiles = settings?.thirdPartyProfiles || {};
-  const profile = profiles[accountName];
-  if (!accountName || !profile || profile.adapter !== adapter) return false;
-  const previousAccessToken = String(renewal.previous?.accessToken || '');
-  const previousRefreshToken = String(renewal.previous?.refreshToken || '');
-  if (
-    String(profile.accessToken || '') !== previousAccessToken
-    || String(profile.refreshToken || '') !== previousRefreshToken
-  ) return false;
-  const normalized = thirdPartyLimits.normalizeThirdPartyProfile({
-    ...profile,
-    accessToken: renewal.next?.accessToken,
-    refreshToken: renewal.next?.refreshToken
-  });
-  if (!normalized) return false;
-  settings.thirdPartyProfiles = {
-    ...profiles,
-    [accountName]: { ...normalized, enabled: profile.enabled !== false }
-  };
-  try {
-    saveSettings({ throwOnError: true });
-  } catch (error) {
-    // Keep the rotated pair in memory so this process can recover on a later
-    // settings write, but tell the caller not to present this renewal as durable.
-    console.log(`[thirdparty] credential renewal persist failed: ${error?.message || error}`);
-    return false;
-  }
-  return true;
-}
-
-function persistThirdPartyAccountKey(update = {}) {
-  const accountName = String(update.accountName || '').trim();
-  const adapter = thirdPartyLimits.normalizeAdapterId(update.adapter);
-  const accountKey = thirdPartyLimits.normalizeCanonicalAccountKey(update.accountKey);
-  const profiles = settings?.thirdPartyProfiles || {};
-  const profile = profiles[accountName];
-  if (
-    !accountName
-    || adapter !== thirdPartyLimits.SUB2API_ADAPTER
-    || !accountKey
-    || !profile
-    || profile.adapter !== adapter
-  ) return false;
-  const baseUrl = thirdPartyLimits.normalizeThirdPartyBaseUrl(update.baseUrl);
-  if (thirdPartyLimits.normalizeThirdPartyBaseUrl(profile.baseUrl) !== baseUrl) return false;
-  if (
-    String(profile.accessToken || '') !== String(update.previous?.accessToken || '')
-    || String(profile.refreshToken || '') !== String(update.previous?.refreshToken || '')
-  ) return false;
-  if (thirdPartyLimits.normalizeCanonicalAccountKey(profile.canonicalAccountKey) === accountKey) {
-    return true;
-  }
-  const normalized = thirdPartyLimits.normalizeThirdPartyProfile({
-    ...profile,
-    canonicalAccountKey: accountKey
-  });
-  if (!normalized) return false;
-  settings.thirdPartyProfiles = {
-    ...profiles,
-    [accountName]: { ...normalized, enabled: profile.enabled !== false }
-  };
-  try {
-    saveSettings({ throwOnError: true });
-  } catch (error) {
-    console.log(`[thirdparty] account identity persist failed: ${error?.message || error}`);
-    return false;
-  }
-  return true;
-}
-
-function thirdPartyProfileWithCanonicalIdentity(profile, provider) {
-  return thirdPartyLimits.normalizeThirdPartyProfile({
-    ...profile,
-    canonicalAccountKey: provider?.accountKey
-  });
-}
 
 // The command carries identity only. Resolve at commit time, after any IPC
 // awaits, and persist the host-declared palette and finite tokens together.
@@ -5604,16 +4994,23 @@ function settingsForRenderer() {
   const rendererSettings = { ...settings };
   delete rendererSettings.icloudRetiredDeviceIds;
   delete rendererSettings.icloudWriterId;
+  delete rendererSettings.limitAccountPresentationCacheIdentity;
+  delete rendererSettings.limitAccountPresentationPending;
   delete rendererSettings.syncContentState;
   delete rendererSettings.pluginSkinRef;
+  // Usage retained for untracked clients: only the collector transform reads
+  // it, and it is most of the settings payload a renderer would clone and keep.
+  delete rendererSettings.archivedClientUsage;
   rendererSettings.pluginAuthorSkin = normalizePluginAuthorSkin(settings.pluginAuthorSkin);
   for (const key of rendererOmittedAccountKeys()) delete rendererSettings[key];
   return {
     ...rendererSettings,
+    windowsBackdropFallback: windowsBackdropFallback(mainWindow),
     syncContentStatus: getSyncContentRuntime().status(),
     locale: trayMenuLocale(),
     deviceIconScope: currentHubIdentity() || 'local',
     ...redactedCredentials,
+    hubProfiles: hubProfilesForRenderer(settings),
     // On a hub the shared list is the truth; settings.subscriptions is only the
     // last-known cache behind it.
     subscriptions: effectiveSubscriptions(),
@@ -5626,6 +5023,7 @@ function settingsForRenderer() {
     subscriptionsUpdatedAt: subscriptionDocumentVersion(subscriptionsDocumentFor(currentHubIdentity())),
     subscriptionsOrphaned: pendingOrphanedSubscriptions(),
     ...accountFieldProjection(settings, process.env),
+    claudeManagedAccounts: claudeAccountService().accounts(),
     codexManagedAccounts: codexAccountsForRenderer(),
     antigravityManagedAccounts: antigravityAccountsForRenderer(),
     workbuddyManagedAccounts: workbuddyAccountsForRenderer(),
@@ -5634,6 +5032,7 @@ function settingsForRenderer() {
     claudeWebLegacyAccount: claudeAccountService().legacyAccount(),
     claudeWebLoginStatuses: claudeAccountService().loginStatuses(),
     limitAccountForms: limitAccountFormsForRenderer(),
+    limitConnectionSources: limitConnectionSourcesForRenderer(),
     currencyRatesEffective: effectiveRates || resolveEffectiveRates(rateCache?.rates || {}, settings?.currencyRates || {}),
     currencyRateInfo: rateCache ? { source: rateCache.source, date: rateCache.date, fetchedAt: rateCache.fetchedAt } : null,
     windowToggleShortcutStatus: currentWindowToggleShortcutStatus(),
@@ -5712,6 +5111,7 @@ async function pushSystemUiThemeAfterChange() {
 
 function pushSettingsToRenderer() {
   const payload = settingsForRenderer();
+  limitsHistoryController?.refresh();
   syncDockSurfaces(payload);
   if (mainWindow && !mainWindow.isDestroyed()) {
     try { mainWindow.webContents.send('settings:push', payload); } catch (_) {}
@@ -5829,7 +5229,7 @@ function ensureNotchController() {
     onToggleRateMode: toggleDockRateMode,
     canRefreshLimits: () => canRefreshEdgeDockStats(),
     onRefreshLimits: () => refreshStatsFromEdgeDock(),
-    onWebSurfaceChanged: () => pluginRuntime?.refreshSurfaces(),
+    onWebSurfaceChanged: () => { pluginRuntime?.refreshSurfaces(); syncPluginQuotaSurfaceDemand(); },
     installNonActivatingInput: (win) => preventAppActivation(win),
     blurAvailable: () => nativeTheme.prefersReducedTransparency !== true,
     applyBlurMask: (win, mask, display) => {
@@ -5906,6 +5306,7 @@ function edgeDockAppearance(rendererSettings = settingsForRenderer()) {
     // list, so its Remaining/Used preference has to reach this renderer too.
     sessionContextMetric: source.sessionContextMetric,
     maskLimitAccountEmails: source.maskLimitAccountEmails,
+    limitsHistoryOpenMode: source.limitsHistoryOpenMode,
     edgeDockWarnColors: source.edgeDockWarnColors === true,
     edgeDockRunningIndicatorEnabled: source.edgeDockRunningIndicatorEnabled !== false,
     // The user's own subscription records, so the card's plan cell can decorate
@@ -5923,6 +5324,7 @@ function edgeDockAppearance(rendererSettings = settingsForRenderer()) {
 const EDGE_DOCK_RATE_ACTIVE_MS = 8000;
 const EDGE_DOCK_RATE_CLEAR_MS = 3 * 60 * 1000;
 let edgeDockRateTracker = null;
+const edgeDockRateHistory = tokenRateApi.createLiveTokenRateHistory();
 let edgeDockRateContext = '';
 let edgeDockRateTimer = null;
 
@@ -5948,6 +5350,7 @@ function edgeDockLiveRateSample(visibleStats) {
   edgeDockRateTimer = null;
   if (!edgeDockShowsLiveRate()) {
     edgeDockRateTracker = null;
+    edgeDockRateHistory.reset();
     edgeDockRateContext = '';
     return null;
   }
@@ -5955,7 +5358,7 @@ function edgeDockLiveRateSample(visibleStats) {
   const syncMode = tokenRateApi.isSharedSyncMode(hubMode);
   const scope = syncMode && settings?.liveTokenRateScope !== 'device' ? 'all' : 'device';
   const selection = tokenRateApi.selectLiveTokenRatePeriods(visibleStats, settings?.deviceId, hubMode, scope);
-  const context = [mode, hubMode || '', settings?.hubUrl || '', settings?.deviceId || '', scope, selection.source].join('|');
+  const context = [mode, hubMode || '', settings?.hubUrl || '', settings?.deviceId || '', settings?.clients || '', scope, selection.source].join('|');
   if (!edgeDockRateTracker) {
     edgeDockRateTracker = tokenRateApi.createLiveTokenRateGroupTracker({
       // Expiry timers subtract Date.now(), so samples must use epoch time too.
@@ -5969,12 +5372,19 @@ function edgeDockLiveRateSample(visibleStats) {
   if (context !== edgeDockRateContext) {
     edgeDockRateContext = context;
     edgeDockRateTracker.reset(selection.entries);
+    edgeDockRateHistory.reset();
   } else {
-    edgeDockRateTracker.observe(selection.entries);
+    const result = edgeDockRateTracker.observe(selection.entries);
+    if (result.changed && !result.sample) edgeDockRateHistory.reset();
+    // Only the side dock's speed card draws history. The Notch and sessions
+    // readouts share the live sample but do not create a chart demand.
+    const historyEnabled = settings?.edgeDockEnabled !== false && settings?.edgeDockItems?.some(item => item.type === 'stat' && item.metric === 'liveRate');
+    if (historyEnabled) edgeDockRateHistory.observe(result.sample);
+    else edgeDockRateHistory.reset();
   }
   // A sample goes idle and then clears without any new push; re-project then.
-  const expiresAt = edgeDockRateTracker.nextExpiryAt();
-  if (expiresAt) {
+  const expiresAt = Math.min(...[edgeDockRateTracker.nextExpiryAt(), edgeDockRateHistory.nextExpiryAt()].filter(Boolean));
+  if (Number.isFinite(expiresAt)) {
     edgeDockRateTimer = setTimeout(() => {
       edgeDockRateTimer = null;
       repaintDockSurfaces();
@@ -6097,6 +5507,7 @@ async function refreshStatsFromEdgeDock() {
 }
 
 function edgeDockCellsFor(visibleStats, items = settings?.edgeDockItems, options = {}) {
+  visibleStats = desktopQuotaStats(visibleStats);
   refreshEdgeDockDerivedPeriods(visibleStats);
   refreshEdgeDockForecast();
   syncCodexPresentationActiveAccount();
@@ -6117,6 +5528,7 @@ function edgeDockCellsFor(visibleStats, items = settings?.edgeDockItems, options
     limitProviders: settings?.limitProviders,
     limitProviderOrder: settings?.limitProviderOrder,
     liveRate: edgeDockLiveRateSample(visibleStats),
+    liveRateHistory: edgeDockRateHistory.getSamples(),
     tokenRateMode: settings?.tokenRateMode
   });
 }
@@ -6164,6 +5576,7 @@ const notchHistory = createNotchHistory({
 });
 
 function pushNotchCells(visibleStats) {
+  visibleStats = desktopQuotaStats(visibleStats);
   notchLastCells = edgeDockCellsFor(visibleStats, notchPanelItems(visibleStats, settings), { includeUnavailableAccounts: true });
   const data = notchDataFor(visibleStats, notchLastCells);
   // Tab names and icons are metadata; opening a page alone requests its data.
@@ -6245,11 +5658,10 @@ function ensureEdgeDockController() {
     ),
     applyShapeMask: (win, commands, width, height, currentDisplay) => {
       const scale = currentDisplay?.scaleFactor || screen.getDisplayMatching?.(win.getBounds())?.scaleFactor || 2;
-      const { buffer, pixelWidth, pixelHeight } = rasterizeMask(toPolygons(commands), width, height, scale);
-      return applyVibrancyMask(win, { buffer, pixelWidth, pixelHeight }, width, height);
+      return maskCardMaterial(win, commands, width, height, scale);
     },
     primaryButtonDown: () => primaryButtonDown(process.platform),
-    onWebSurfaceChanged: () => pluginRuntime?.refreshSurfaces(),
+    onWebSurfaceChanged: () => { pluginRuntime?.refreshSurfaces(); syncPluginQuotaSurfaceDemand(); },
     installNonActivatingInput: (win) => process.platform === 'darwin' ? preventAppActivation(win)
       : installWindowsNonActivatingInput(win, { logger: (message) => console.log(message) }),
     performHaptic: (pattern, performanceTime) => performMacHaptic({ pattern, performanceTime }),
@@ -6259,6 +5671,8 @@ function ensureEdgeDockController() {
     onSwitchCodexAccount: (accountId) => switchCodexAccountFromEdgeDock(accountId),
     canRefreshLimits: () => canRefreshEdgeDockStats(),
     onRefreshLimits: () => refreshStatsFromEdgeDock(),
+    onRefreshLimitAccount: (providerId, account) => refreshLimitProvider(providerId, account),
+    limitProbes: () => limitProbes,
     onOpenResetForecastSource: () => {
       if (isAllowedExternalUrl(CODEX_RESET_FORECAST_SOURCE_URL)) void shell.openExternal(CODEX_RESET_FORECAST_SOURCE_URL);
     },
@@ -6287,7 +5701,11 @@ function syncDockSurfaces(rendererSettings) {
     if (!notchController?.isRunning()) {
       if (edgeDockRateTimer) clearTimeout(edgeDockRateTimer);
       edgeDockRateTimer = null;
+      edgeDockRateTracker = null;
+      edgeDockRateContext = '';
+      edgeDockRateHistory.reset();
     }
+    syncPluginQuotaSurfaceDemand();
     return;
   }
   const controller = ensureEdgeDockController();
@@ -6303,6 +5721,7 @@ function syncDockSurfaces(rendererSettings) {
   // Now that the controller is running (sync() starts it when enabled), arm the
   // timer against the cells that were just handed over.
   scheduleSessionExpiry();
+  syncPluginQuotaSurfaceDemand();
 }
 
 function refreshLimitStatsPresentation() {
@@ -6386,6 +5805,7 @@ async function refreshFromTray() {
     refreshContextMenu: refreshTrayContextMenu,
     action: async () => {
       try {
+        void pluginRuntime?.refreshLimits().catch(error => console.log(`[plugins] Limits refresh failed: ${error.message}`));
         const stats = await fetchStats({ force: true, forceUsage: true });
         // Collector ticks normally publish their own final snapshot. Only bridge the
         // result when fetchStats returned a different object (for example, a remote hub
@@ -6602,7 +6022,7 @@ function ensureTray() {
           home: true,
           project: settings?.projectsEnabled !== false,
           session: true,
-          limits: settings?.limitsEnabled !== false && parseLimitProviders(settings?.limitProviders).length > 0,
+          limits: settings?.limitsEnabled !== false && migrateLimitProviders(settings?.limitProviders).length > 0,
           trends: settings?.historyEnabled !== false,
           status: true
         }
@@ -6718,6 +6138,7 @@ function startMode() {
       startHostStats();
       startHostCollector();
       void getSyncContentRuntime().refresh();
+      void getAccountPresentationSync().refresh();
       reconcileSharedSubscriptions();
       return;
     }
@@ -6731,6 +6152,7 @@ function startMode() {
       startStatsStream({ resetSnapshot: true });
       startSyncCollector();
       void getSyncContentRuntime().refresh();
+      void getAccountPresentationSync().refresh();
       reconcileSharedSubscriptions();
     } else {
       startLocalCollector();
@@ -6841,6 +6263,8 @@ function stopAll() {
   try { sessionUsageArchiveStore.close(); } catch (error) {
     console.log(`[session-archive] close failed: ${error?.message || error}`);
   }
+  limitsHistoryController?.dispose();
+  limitsHistoryStore?.closeSync();
   if (tray && !tray.isDestroyed()) tray.destroy();
   tray = null;
 }
@@ -6972,6 +6396,7 @@ function refreshManualStats() {
   if (manualStatsRefreshInFlight?.runtime === runtime && manualStatsRefreshInFlight.generation === generation) {
     return manualStatsRefreshInFlight.promise;
   }
+  void pluginRuntime?.refreshLimits().catch(error => console.log(`[plugins] Limits refresh failed: ${error.message}`));
   const revision = statsPushRevision;
   const request = { runtime, generation, promise: null };
   request.promise = fetchStats({ force: true, forceHistory: true, forceSelfSync: true }).then((stats) => {
@@ -7024,6 +6449,15 @@ async function fetchStats(options = {}) {
   }
   const { url: hubUrl, secret } = effectiveHubConfig();
   if (!hubUrl) return withHistoryPreview(aggregateDevices([], 0), []);
+  // A connected stream keeps this cache current. The renderer's periodic
+  // fallback only needs a full download once stream data has gone quiet. Other
+  // reads, such as deletion eligibility checks, always read the Hub.
+  if (options?.streamCache === true && streamConnected) {
+    const cached = currentHubStatsCache();
+    if (cached && Date.now() - Date.parse(latestHubStatsReceivedAt) < HUB_STREAM_CACHE_FRESH_MS) {
+      return injectLocalDeviceStatus(composeLocalSyncSummary(cached, lastCollectedDevice));
+    }
+  }
   const url = `${hubUrl.replace(/\/$/, '')}/api/stats`;
   const response = await fetch(url, { headers: secret ? { authorization: `Bearer ${secret}` } : {} });
   if (!response.ok) throw new Error(`Hub ${response.status}: ${(await response.text()).slice(0, 200)}`);
@@ -7550,35 +6984,27 @@ function loadWindowFile(target, options = {}) {
     revealWindow(target, { inactive: options.inactive === true });
   };
   const waitForContent = options.waitForContent === true;
+  const readyChannel = waitForContent ? 'window:contentReady' : 'window:appearanceReady';
   const onContentReady = (event) => {
     if (event.sender === target.webContents) reveal();
   };
   const fallbackTimer = setTimeout(reveal, 2500);
   const cleanup = () => {
     clearTimeout(fallbackTimer);
-    ipcMain.removeListener('window:contentReady', onContentReady);
+    ipcMain.removeListener(readyChannel, onContentReady);
   };
   target.once('show', cleanup);
   target.once('closed', cleanup);
-  if (waitForContent) {
-    // A recreated window paints its static "0" defaults before the renderer's
-    // async stats fetch resolves; revealing on load would flash empty content.
-    // Wait until the renderer reports it has rendered real data instead.
-    ipcMain.on('window:contentReady', onContentReady);
-    target.webContents.once('did-finish-load', () => applyZoomFactor(target));
-  } else {
-    target.once('ready-to-show', reveal);
-    target.webContents.once('did-finish-load', () => {
-      applyZoomFactor(target);
-      reveal();
-    });
-  }
+  // Startup needs the saved appearance, not stats or provider/network work.
+  // Window replacements can still wait for real content to avoid empty flashes.
+  ipcMain.on(readyChannel, onContentReady);
+  target.webContents.once('did-finish-load', () => applyZoomFactor(target));
   target.webContents.once('did-fail-load', (_event, code, description) => {
     console.log(`[window] renderer load failed: ${code} ${description}`);
     reveal();
   });
   const filePath = path.join(__dirname, 'renderer', 'index.html');
-  const load = options.query ? target.loadFile(filePath, { query: options.query }) : target.loadFile(filePath);
+  const load = options.query ? target.webContents.loadFile(filePath, { query: options.query }) : target.webContents.loadFile(filePath);
   load.catch((error) => {
     console.log(`[window] renderer load failed: ${error.message}`);
     reveal();
@@ -7588,9 +7014,6 @@ function loadWindowFile(target, options = {}) {
 function createWindow(boundsOverride, options = {}) {
   ensureSettingsLoaded();
   const collapsedFloatingBubble = options.collapsedFloatingBubble === true;
-  const glass = nativeBlurEnabled();
-  const windowsBackdrop = normalizeWindowsBackdropMode(settings?.windowsBackdrop);
-  const windowsAccent = process.platform === 'win32' && glass && windowsBackdrop === WINDOWS_BACKDROP_ACCENT;
   const bounds = boundsOverride || restoredBounds() || DEFAULT_WINDOW;
   const collapsedSizeLimits = {
     minWidth: bounds.width,
@@ -7598,13 +7021,13 @@ function createWindow(boundsOverride, options = {}) {
     maxWidth: bounds.width,
     maxHeight: bounds.height
   };
-  const win = new BrowserWindow({
+  const windowOptions = {
     width: bounds.width,
     height: bounds.height,
     ...(typeof bounds.x === 'number' ? { x: bounds.x, y: bounds.y } : {}),
     ...(collapsedFloatingBubble ? collapsedSizeLimits : WINDOW_LIMITS),
     frame: false,
-    transparent: !(process.platform === 'win32' && glass),
+    transparent: true,
     resizable: !collapsedFloatingBubble,
     show: false,
     backgroundColor: '#00000000',
@@ -7617,26 +7040,23 @@ function createWindow(boundsOverride, options = {}) {
     // Seed the legacy fallback's construction-only active state. The material
     // manager immediately replaces HUD with Liquid Glass when supported.
     ...(process.platform === 'darwin' ? { vibrancy: 'hud', visualEffectState: 'active' } : {}),
-    ...(process.platform === 'win32' && glass && !windowsAccent ? { backgroundMaterial: 'acrylic' } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
+      zoomFactor: clampZoom(settings.zoomFactor),
       contextIsolation: true,
       nodeIntegration: false
     }
-  });
+  };
+  const win = process.platform === 'win32'
+    ? createRetainedWindow({ BaseWindow, WebContentsView }, windowOptions, options.previousWindow, {
+      beforeReveal: refreshWindowsBackdrop
+    })
+    : new BrowserWindow(windowOptions);
   mainWindow = win;
   mainWindowChrome = { collapsedFloatingBubble };
   applyMacSpaceBehavior();
   applyWindowsChrome(win, { round: true });
-  let windowsAccentFallback = false;
-  if (windowsAccent && !applyWindowsAccentBlur(win)) {
-    // The Accent API is undocumented and can disappear or reject a window on
-    // a future Windows build. This window is still non-transparent, so the
-    // documented Electron Acrylic material is a safe in-place fallback.
-    windowsAccentFallback = true;
-    console.warn('[window] AccentBlurBehind unavailable; falling back to Acrylic');
-    try { win.setBackgroundMaterial('acrylic'); } catch (_) {}
-  }
+  suppressLinuxSystemContextMenu(win);
   win.on('maximize', () => {
     if (!shouldTrackWindowMaximized(settings, floatingBubbleState)) {
       // A tray popover is sized from getBounds() on every open, so a maximized
@@ -7653,11 +7073,11 @@ function createWindow(boundsOverride, options = {}) {
     persistWindowState(settings, saveSettings, normalWindowBounds(win), false);
     persistBoundsSoon();
   });
-  win.webContents.setWindowOpenHandler(({ url }) => {
+  if (!options.previousWindow) win.webContents.setWindowOpenHandler(({ url }) => {
     if (isAllowedExternalUrl(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
-  win.webContents.on('will-navigate', (event, url) => {
+  if (!options.previousWindow) win.webContents.on('will-navigate', (event, url) => {
     event.preventDefault();
     if (isAllowedExternalUrl(url)) shell.openExternal(url);
   });
@@ -7668,6 +7088,7 @@ function createWindow(boundsOverride, options = {}) {
     stopFloatingBubbleAutoCollapseTimer();
   });
   win.on('blur', () => {
+    limitsHistoryController?.hide();
     nudgeTaskbarZOrder();
     if (!suppressNextBlurHide) sendMainWindowEvent('window:summonCancelled');
     if (settings?.trayMode && !suppressNextBlurHide && !quitRequested) {
@@ -7676,15 +7097,14 @@ function createWindow(boundsOverride, options = {}) {
       if (wasVisible) {
         hidePopover();
         // Cocoa can send this blur before Tray.mouse-down for the same click.
-        // The cursor point lets that later click identify its own blur without
-        // mistaking a quick click on another app followed by a tray click.
+        // Retain its cursor point for that later tray press.
         if (point && tray?.isPointerOverIcon?.(point)) recentPopoverBlur = { at: performance.now(), point };
       }
     }
     else if (!quitRequested) scheduleFloatingBubbleAutoCollapse();
   });
-  win.on('resized', () => { persistBoundsSoon(); syncTaskbarZOrder(); });
-  win.on('moved', () => { persistBoundsSoon(); syncTaskbarZOrder(); });
+  const onBoundsChange = () => { persistBoundsSoon(); syncTaskbarZOrder(); };
+  for (const eventName of ['resize', 'resized', 'move', 'moved']) win.on(eventName, onBoundsChange);
   win.on('show', syncTaskbarZOrder);
   win.on('restore', syncTaskbarZOrder);
   win.on('hide', stopTaskbarZOrderKeeper);
@@ -7701,30 +7121,30 @@ function createWindow(boundsOverride, options = {}) {
       applyMacActivationPolicy({ mainWindowVisible: false });
     }
   });
-  win.webContents.on('before-input-event', handleZoomShortcut);
+  if (!options.previousWindow) win.webContents.on('before-input-event', handleZoomShortcut);
   // The dock's own windows would otherwise keep the process alive after the
   // last real window closes, which window-all-closed relies on for quitting.
   win.on('closed', () => {
     if (quitRequested || process.platform === 'darwin') return;
-    if (BrowserWindow.getAllWindows().every((other) => (edgeDockController?.owns(other) || notchController?.owns(other)))) app.quit();
+    if (BaseWindow.getAllWindows().every((other) => (edgeDockController?.owns(other) || notchController?.owns(other)))) app.quit();
   });
   win.on('show', () => syncPluginWindowVisibility(win));
   win.on('hide', () => syncPluginWindowVisibility(win));
   win.on('minimize', () => syncPluginWindowVisibility(win));
   win.on('restore', () => syncPluginWindowVisibility(win));
-  win.webContents.on('did-finish-load', () => {
+  if (!options.previousWindow) win.webContents.on('did-finish-load', () => {
     sendFloatingBubbleState();
     // Only report a window that is already on screen. A window still awaiting its
-    // reveal reports isVisible() === false, and loadWindowFile({ waitForContent })
-    // reveals it *because* the renderer painted real content — pushing "hidden"
-    // here stops that render, so the reveal could only come from the 2.5s
-    // fallback. Electron reports visibilityState 'visible' for a show:false
+    // reveal reports isVisible() === false. loadWindowFile waits for renderer
+    // appearance/content readiness; pushing "hidden" here prevents that work,
+    // leaving only the 2.5s fallback. Electron reports visibilityState 'visible' for a show:false
     // window, which is the default the renderer keeps; trayMode instead seeds the
     // hidden state through the windowHidden query flag. Keep this listener for
     // later loads too: Cmd+Shift+R retains that query flag, so a visible tray
     // window needs its native visibility resynced after every renderer reload.
-    if (win.isVisible()) sendMainWindowVisibility(win);
+    if (mainWindow?.isVisible()) sendMainWindowVisibility(mainWindow);
   });
+  if (options.previousWindow) return win;
   loadWindowFile(win, {
     waitForContent: options.waitForContent === true,
     inactive: options.inactive === true,
@@ -7737,8 +7157,7 @@ function createWindow(boundsOverride, options = {}) {
         viewState: rendererViewState
       }),
       ...(settings?.trayMode ? { windowHidden: '1' } : {}),
-      ...(settings?.systemGlass === false ? { systemGlassDisabled: '1' } : {}),
-      ...(windowsAccentFallback ? { windowsBackdropFallback: '1' } : {})
+      ...(settings?.systemGlass === false ? { systemGlassDisabled: '1' } : {})
     }
   });
 }
@@ -7758,21 +7177,60 @@ function handleZoomShortcut(event, input) {
 }
 
 function replaceMainWindow(bounds, options = {}) {
-  const old = mainWindow;
-  const wasFocused = old && !old.isDestroyed() ? old.isFocused() : false;
-  if (old && !old.isDestroyed()) old.removeAllListeners('close');
-  // Build the new window first so total window count never drops to 0
-  // (otherwise window-all-closed fires and quits the app on Windows).
-  createWindow(bounds, {
-    collapsedFloatingBubble: options.collapsedFloatingBubble === true,
-    suppressInitialNumberAnimation: options.suppressInitialNumberAnimation === true,
-    waitForContent: options.waitForContent === true,
-    inactive: options.inactive === true
+  const epoch = ++mainWindowReplacementEpoch;
+  mainWindowReplacementTask = mainWindowReplacementTask.then(async () => {
+    if (epoch !== mainWindowReplacementEpoch) return;
+    const old = mainWindow;
+    if (process.platform === 'win32') {
+      if (!mainWindowChrome.collapsedFloatingBubble) {
+        await captureRetainedWindowState(old)
+          .catch(error => console.warn(`[window] view capture failed: ${error.message}`));
+      }
+      if (epoch !== mainWindowReplacementEpoch || old !== mainWindow || old.isDestroyed()
+        || (options.collapsedFloatingBubble === true) !== floatingBubbleState.collapsed) {
+        // An in-place expansion can supersede a collapse while capture is in
+        // flight without requesting another native host. Release its snapshot.
+        if (old === mainWindow && !old.isDestroyed() && !mainWindowChrome.collapsedFloatingBubble) {
+          await restoreRetainedWindowState(old);
+        }
+        return;
+      }
+    }
+    const wasFocused = old && !old.isDestroyed() ? old.isFocused() : false;
+    if (old && !old.isDestroyed()) old.removeAllListeners('close');
+    if (old && !old.isDestroyed()) old.removeAllListeners('blur');
+    // Build the new window first so total window count never drops to 0
+    // (otherwise window-all-closed fires and quits the app on Windows).
+    createWindow(bounds, {
+      previousWindow: process.platform === 'win32' ? old : undefined,
+      collapsedFloatingBubble: options.collapsedFloatingBubble === true,
+      suppressInitialNumberAnimation: options.suppressInitialNumberAnimation === true,
+      waitForContent: options.waitForContent === true,
+      inactive: options.inactive === true
+    });
+    const next = mainWindow;
+    if (process.platform === 'win32') {
+      if (windowsBackdropFallback(old) !== windowsBackdropFallback(next)) pushSettingsToRenderer();
+      sendFloatingBubbleState();
+      if (old?.isMinimized()) next.minimize();
+      else if (old?.isVisible()) {
+        restoreWindowMaximized(next, settings, { collapsedFloatingBubble: options.collapsedFloatingBubble === true });
+        revealWindow(next, { inactive: options.focus === false || !wasFocused });
+      }
+      if (!next.isVisible() || next.isMinimized()) {
+        old?.destroy();
+        await restoreRetainedWindowState(next, !options.collapsedFloatingBubble);
+        return;
+      }
+    }
+    handoffWindow(old, next, {
+      focus: options.focus === true || (options.focus !== false && wasFocused)
+    });
+    if (process.platform === 'win32') await restoreRetainedWindowState(next, !options.collapsedFloatingBubble);
+  }).catch(error => {
+    console.warn(`[window] host replacement failed: ${error.message}`);
   });
-  const next = mainWindow;
-  handoffWindow(old, next, {
-    focus: options.focus === true || (options.focus !== false && wasFocused)
-  });
+  return mainWindowReplacementTask;
 }
 
 function discardFailedDashboardWindow(win, reason) {
@@ -7781,36 +7239,43 @@ function discardFailedDashboardWindow(win, reason) {
   win.destroy();
 }
 
+function showDashboardWindow(win) {
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
 function createDashboardWindow() {
   if (dashboardWindow && !dashboardWindow.isDestroyed()) {
-    // Reload so a reopened window always picks up the latest renderer + fresh history,
-    // instead of showing whatever was loaded when it first opened.
-    dashboardWindow.hide();
-    dashboardWindow.webContents.reload();
+    // Focus/visibility already refresh history in place. Preserve the selected
+    // view, and let the initial ready event reveal a still-loading Dashboard.
+    if (dashboardWindowReady) showDashboardWindow(dashboardWindow);
     return dashboardWindow;
   }
-  const glass = nativeBlurEnabled();
-  const win = new BrowserWindow({
+  const windowOptions = {
     width: 920,
     height: 620,
     minWidth: 560,
     minHeight: 420,
     frame: false,
-    transparent: !(process.platform === 'win32' && glass),
+    transparent: true,
     show: false,
     backgroundColor: '#00000000',
     ...appWindowIcon(),
     skipTaskbar: false,
     ...(process.platform === 'darwin' ? { vibrancy: 'hud', visualEffectState: 'active' } : {}),
-    ...(process.platform === 'win32' && glass ? { backgroundMaterial: 'acrylic' } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false
     }
-  });
+  };
+  const win = new BrowserWindow(windowOptions);
   dashboardWindow = win;
+  dashboardWindowReady = false;
   applyWindowsChrome(win, { round: true });
+  suppressLinuxSystemContextMenu(win);
+  syncWindowsBackdrop(win, { enabled: nativeBlurEnabled() });
   attachNativeMaterialVisibility(win, () => nativeMaterialOptions(settings, true));
   syncNativeMaterialVisibility(win, nativeMaterialOptions(settings, true));
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -7821,21 +7286,22 @@ function createDashboardWindow() {
     event.preventDefault();
     if (isAllowedExternalUrl(url)) shell.openExternal(url);
   });
-  // Only dashboard:ready may reveal a healthy window. Slow hub history must not
-  // race a wall-clock fallback and expose the unprepared heatmap. Actual load or
-  // renderer failures discard the hidden window so the next open starts cleanly.
+  // Only dashboard:ready may first reveal a healthy window. Slow hub history must not
+  // race a wall-clock fallback and expose the unprepared heatmap. Actual load
+  // failures discard the hidden window so the next open starts cleanly.
+  // Renderer crashes use the shared app recovery handler instead.
   win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, _url, isMainFrame) => {
     if (!isMainFrame || errorCode === -3) return; // ERR_ABORTED is expected during reloads.
     discardFailedDashboardWindow(win, `load failed: ${errorDescription}`);
-  });
-  win.webContents.on('render-process-gone', (_event, details) => {
-    discardFailedDashboardWindow(win, `renderer stopped: ${details.reason}`);
   });
   win.on('unresponsive', () => {
     if (!win.isVisible()) discardFailedDashboardWindow(win, 'renderer became unresponsive while opening');
   });
   win.on('closed', () => {
-    dashboardWindow = null;
+    if (dashboardWindow === win) {
+      dashboardWindow = null;
+      dashboardWindowReady = false;
+    }
   });
   win.loadFile(path.join(__dirname, 'renderer', 'dashboard.html'))
     .catch((error) => discardFailedDashboardWindow(win, `load failed: ${error.message}`));
@@ -7856,66 +7322,6 @@ async function getDashboardHistory(options = {}) {
       source
     })
   }, settings?.modelAliases, { grouping: settings?.modelAliasGrouping });
-}
-
-let cursorStatusCache = { value: null, at: 0 };
-let opencodeStatusCache = { value: null, at: 0 };
-const CURSOR_STATUS_TTL_MS = 30 * 1000;
-const CURSOR_EXTERNAL_AGENT_ERROR = 'Stop the headless agent before managing Cursor accounts.';
-
-function normalizeManualCookie(input) {
-  return cursorAuth.normalizeCursorSessionToken(input);
-}
-
-async function cursorStatusValue({ discover = false } = {}) {
-  const managementBlocked = isExternalAgentActive();
-  let accounts = cursorAuth.listAccounts();
-  if (discover && !managementBlocked) {
-    try { await cursorAuth.runCursorDiscover(); } catch (_) { /* signed-out or unavailable Cursor app */ }
-    accounts = cursorAuth.listAccounts();
-  }
-  const disabled = new Set(normalizeCursorDisabledAccountIds(settings?.cursorDisabledAccountIds));
-  const manual = new Set(normalizeCursorAccountIds(settings?.cursorManualAccountIds));
-  const safeAccounts = await Promise.all(accounts.map(async (account) => {
-    const probeResult = await cursorProbe.probe(account.sessionToken);
-    return {
-      id: account.id,
-      enabled: !disabled.has(account.id),
-      removable: manual.has(account.id),
-      email: probeResult.ok ? probeResult.user?.email || '' : '',
-      label: account.label || '',
-      membershipType: probeResult.ok ? probeResult.usage.membershipType || '' : '',
-      expired: !probeResult.ok && probeResult.error?.kind === 'unauthorized',
-      error: probeResult.ok ? '' : probeResult.error?.message || ''
-    };
-  }));
-  return {
-    loggedIn: safeAccounts.length > 0,
-    accounts: safeAccounts,
-    linkedCount: safeAccounts.filter((account) => account.enabled && !account.expired && !account.error).length,
-    managementBlocked
-  };
-}
-
-function rebuildWindow() {
-  if (!mainWindow) return;
-  const bounds = rebuildWindowBounds(mainWindow, floatingBubbleState);
-  const wasFocused = mainWindow.isFocused();
-  const old = mainWindow;
-  floatingBubbleState.collapsed = false;
-  floatingBubbleState.side = null;
-  floatingBubbleState.collapsedBounds = null;
-  floatingBubbleState.expandedBounds = null;
-  floatingBubbleState.suppressNextCollapse = false;
-  stopFloatingBubbleAutoCollapseTimer();
-  old.removeAllListeners('close');
-  // Build the new window first so total window count never drops to 0
-  // (otherwise window-all-closed fires and quits the app on Windows).
-  createWindow(bounds);
-  mainWindow.once('show', () => {
-    if (!old.isDestroyed()) old.destroy();
-    if (wasFocused && !mainWindow.isDestroyed()) mainWindow.focus();
-  });
 }
 
 // Plugin hosts load from their own privileged scheme, which Chromium only
@@ -8067,6 +7473,7 @@ app.whenReady().then(() => {
       sessionUsageArchiveStore.clear();
       clearDailyHistoryArchive();
       usageTransform.reset();
+      localArchivedSessionCount.archiveCleared();
       return { ok: true };
     } catch (error) {
       return { ok: false, error: error.message };
@@ -8088,10 +7495,96 @@ app.whenReady().then(() => {
   ipcMain.handle('syncContent:configure', (_event, options) => getSyncContentRuntime().configure(options));
   ipcMain.handle('syncContent:retryCleanup', () => getSyncContentRuntime().retryCleanup());
   const credentialCommands = createCredentialCommands({
+    allowRetainedFixedCredentials: true,
     getSettings: () => settings,
     applySettingsPatch: applyCredentialSettingsPatch,
     probeDeps: credentialProbeDeps
   });
+  accountSlotService = createAccountSlotService({
+    getSettings: () => settings,
+    ownerWrite: (provider, patch, legacyMetadata, legacyWrites) => {
+      const store = legacyMetadata !== undefined && provider !== 'minimax' ? ensureCredentialStore() : null;
+      const previousDocument = store?.readDocument();
+      const previousSettings = settings;
+      try {
+        if (store) {
+          const document = structuredClone(previousDocument);
+          const records = document.credentials.providers?.[provider]?.accounts;
+          for (const { id, credential } of legacyWrites) {
+            if (!records) throw new Error('Legacy credential context missing');
+            if (credential === null) delete records[id];
+            else records[id] = { ...records[id], [provider === 'claude' ? 'cookie' : 'credentials']: credential };
+          }
+          store.writeDocument(document);
+        }
+        const legacyPatch = legacyMetadata === undefined ? {} : (provider === 'minimax'
+          ? { minimaxApiProfiles: legacyMetadata, minimaxApiKey: '' }
+          : { [`${provider}ManagedAccounts`]: legacyMetadata });
+        settings = { ...settings, ...patch, ...legacyPatch };
+        saveSettings({ throwOnError: true });
+      } catch (error) {
+        settings = previousSettings;
+        store?.writeDocument(previousDocument);
+        throw error;
+      }
+    },
+    presentationAccounts: async provider => {
+      const rows = [...(localStats?.limits?.providers || []), ...(latestStats?.limits?.providers || [])].filter(row => row.provider === provider);
+      if (provider === 'codex') rows.push(...codexAccountsForRenderer());
+      if (provider === 'cursor') rows.push(...cursorAccountService().presentationAccounts());
+      if (provider === 'mimo') rows.push(...mimoAccountsForRenderer());
+      if (provider === 'opencode') {
+        const result = await opencodeAccountService().getProfiles();
+        rows.push(...Object.values(result?.profiles || {}));
+        if (result?.ambientAccountKey) rows.push({ accountKey: result.ambientAccountKey });
+      }
+      if (provider === 'thirdparty') {
+        const result = await thirdpartyAccountService().getProfiles();
+        rows.push(...Object.values(result?.profiles || {}));
+        if (result?.environmentAccountKey) rows.push({ accountKey: result.environmentAccountKey });
+      }
+      return rows.map(row => row.accountKey || row.canonicalAccountKey).filter(Boolean);
+    },
+    write: (patch) => {
+      const { limitProviders, limitsEnabled, ...slotPatch } = patch;
+      settings = { ...settings, ...slotPatch };
+      saveSettings({ throwOnError: true });
+      if (patch.limitAccountPresentation) pushSettingsToRenderer();
+      // Turning a provider on takes the ordinary settings path (selection
+      // normalization, runtime start) and is published to the renderer.
+      // The account is already durable here: an activation failure is reported
+      // but must not turn the save into a failure the user retries as a duplicate.
+      if (limitProviders !== undefined && (limitProviders !== settings.limitProviders || limitsEnabled !== settings.limitsEnabled)) {
+        try {
+          applySettingsPatch({ limitProviders, limitsEnabled });
+          pushSettingsToRenderer();
+        } catch (error) {
+          console.error(`[limits] could not turn on collection after saving an account: ${error?.message || error}`);
+        }
+      }
+    },
+    owners: {
+      claude: (id, operation, value) => operation === 'remove' ? claudeAccountService().removeAccount(id) : claudeAccountService().setAccountEnabled(id, value),
+      workbuddy: (id, operation, value) => operation === 'remove' ? workbuddyAccountService().removeAccount(id) : workbuddyAccountService().setAccountEnabled(id, value),
+      antigravity: (id, operation, value) => operation === 'remove' ? antigravityAccountService().removeAntigravityManagedAccount(id) : antigravityAccountService().setAntigravityManagedAccountEnabled(id, value)
+    },
+    onPresentation: (operations) => getAccountPresentationSync().publish(operations),
+    probeDeps: credentialProbeDeps,
+    onChanged: (provider, change) => {
+      deviceRuntimeHandle?.reconfigureLimits(electronLimitsConfig());
+      // A rename or reorder is re-projected by the reconfigure above; asking the
+      // provider again would only spend its rate limit.
+      if (change?.refresh === false) return;
+      if (deviceRuntimeHandle) return invalidateAccountSlotChange(deviceRuntimeHandle, provider, change);
+      // No runtime yet: the retired accounts are cleared once one starts.
+      for (const accountKey of change?.retiredAccountKeys || []) {
+        void queueLimitInvalidation({ provider, accountKey }, 'settings-change', { clear: true, refresh: false });
+      }
+    }
+  });
+  for (const operation of ['list', 'add', 'replace', 'rename', 'setEnabled', 'remove', 'move', 'presentation']) {
+    ipcMain.handle(`limits:accountSlots:${operation}`, (_event, ...args) => accountSlotService[operation](...args));
+  }
   // Resolves only once a worker-hosted transform runs with the saved settings:
   // pausing the session archive must not be reported done while the worker can
   // still capture under the old value.
@@ -8131,14 +7624,14 @@ app.whenReady().then(() => {
   // The settings:update body, named so a credential save persists through the
   // exact same normalization, runtime reconfigure and limit invalidation.
   function applySettingsPatch(patch, onDotsVisibilityRefresh = () => {}, limitContext = {}) {
+    patch = prepareHubProfilePatch(settings, patch);
     const skinSelection = preparePluginSkinSettings(patch, settings, pluginRuntime);
     patch = skinSelection.patch;
     const contentRuntime = getSyncContentRuntime();
     credentialCommands.noteSettingsPatch(patch);
+    minimaxApiKeys.noteSettingsPatch(patch);
     const previousSettingsState = settings;
     const previousRuntimeSettings = JSON.parse(JSON.stringify(settings));
-    const previousNativeMaterial = nativeBlurEnabled();
-    const previousWindowsBackdrop = normalizeWindowsBackdropMode(settings?.windowsBackdrop);
     const previousClients = settings.clients;
     const previousDiscordRpcEnabled = settings.discordRpcEnabled;
     const previousShowTrayIcon = settings.showTrayIcon;
@@ -8158,6 +7651,8 @@ app.whenReady().then(() => {
     const previousProxyKey = JSON.stringify([settings.proxyUrl || '', settings.noProxy || '']);
     const normalizedCurrency = patch.currency !== undefined ? normalizeCurrency(patch.currency, settings.currency) : normalizeCurrency(settings.currency);
     const normalizedPatch = { ...patch, currency: normalizedCurrency };
+    // Only Cursor's explicit account lifecycle can assign manual ownership.
+    delete normalizedPatch.cursorManualAccountIds;
     delete normalizedPatch.windowMaximized;
     delete normalizedPatch.workbuddyEndpoint;
     delete normalizedPatch.workbuddyLocalAppEnabled;
@@ -8181,13 +7676,21 @@ app.whenReady().then(() => {
     delete normalizedPatch.subscriptionsOrphaned;
     delete normalizedPatch.subscriptionsCacheHub;
     delete normalizedPatch.icloudWriterId;
+    // Presentation writes use the serialized account command lane.
+    delete normalizedPatch.limitAccountPresentation;
+    delete normalizedPatch.limitAccountPresentationCacheIdentity;
+    delete normalizedPatch.limitAccountPresentationPending;
     // Derived for the renderer from the hub document, not settings. Persisting a
     // copy would leave a key on disk that describes a hub as of whenever a form
     // was last saved, waiting to be mistaken for the real thing.
     delete normalizedPatch.subscriptionsShared;
     delete normalizedPatch.subscriptionsHub;
     delete normalizedPatch.subscriptionsUpdatedAt;
-    if (patch.clients !== undefined) normalizedPatch.clients = clientsCsvForSetting(patch.clients, '');
+    const sessionUsageArchiveEnabled = parseBoolean(patch.sessionUsageArchiveEnabled ?? settings.sessionUsageArchiveEnabled, true);
+    if (patch.clients !== undefined) {
+      normalizedPatch.clients = clientsCsvForSetting(patch.clients, '');
+      assertClientArchiveCaptureReady(normalizedPatch.clients, sessionUsageArchiveEnabled);
+    }
     if (patch.customScanPaths !== undefined) {
       const limitError = customScanPathLimitError(patch.customScanPaths);
       if (limitError) throw new Error(limitError);
@@ -8293,6 +7796,8 @@ app.whenReady().then(() => {
       edgeDockWarnColors: parseBoolean(patch.edgeDockWarnColors ?? settings.edgeDockWarnColors, false),
       edgeDockMacBackdrop: normalizeEdgeDockBackdropMode(patch.edgeDockMacBackdrop ?? settings.edgeDockMacBackdrop),
       edgeDockWindowsBackdrop: normalizeWindowsDockBackdropMode(patch.edgeDockWindowsBackdrop ?? settings.edgeDockWindowsBackdrop),
+      edgeDockBubbleSize: normalizeEdgeDockBubbleSize(patch.edgeDockBubbleSize ?? settings.edgeDockBubbleSize),
+      edgeDockBubbleCustomScale: normalizeEdgeDockCustomScale(patch.edgeDockBubbleCustomScale ?? settings.edgeDockBubbleCustomScale),
       edgeDockSize: normalizeEdgeDockSize(patch.edgeDockSize ?? settings.edgeDockSize),
       edgeDockCustomScale: normalizeEdgeDockCustomScale(patch.edgeDockCustomScale ?? settings.edgeDockCustomScale),
       // `null` is a real value here (back to the automatic default), so the
@@ -8317,9 +7822,10 @@ app.whenReady().then(() => {
           { currencyApi: { normalizeCurrency } }
         )
       },
-      limitProviders: patch.limitProviders !== undefined ? parseLimitProviders(patch.limitProviders).join(',') : settings.limitProviders,
+      limitProviders: patch.limitProviders !== undefined ? migrateLimitProviders(patch.limitProviders) : settings.limitProviders,
       limitProviderOrder: patch.limitProviderOrder !== undefined ? migrateLimitProviderOrder(patch.limitProviderOrder) : settings.limitProviderOrder,
       clientDisplayOrder: patch.clientDisplayOrder !== undefined ? migrateClientDisplayOrder(patch.clientDisplayOrder) : (settings.clientDisplayOrder || ''),
+      separateQoderClients: parseBoolean(patch.separateQoderClients ?? settings.separateQoderClients, false),
       hiddenClients: patch.hiddenClients !== undefined ? migrateClientSelection(patch.hiddenClients, normalizeHiddenClients) : migrateClientSelection(settings.hiddenClients, normalizeHiddenClients),
       pinnedClients: patch.pinnedClients !== undefined ? migrateClientSelection(patch.pinnedClients, normalizePinnedClients) : migrateClientSelection(settings.pinnedClients, normalizePinnedClients),
       viewDisplayOrder: patch.viewDisplayOrder !== undefined ? migrateViewDisplayOrder(patch.viewDisplayOrder) : (settings.viewDisplayOrder || ''),
@@ -8328,6 +7834,7 @@ app.whenReady().then(() => {
       hiddenHomeModules: patch.hiddenHomeModules !== undefined ? normalizeHiddenHomeModules(patch.hiddenHomeModules, DEFAULT_HOME_MODULE_LIST) : normalizeHiddenHomeModules(settings.hiddenHomeModules, DEFAULT_HOME_MODULE_LIST),
       homeModuleCounts: normalizeHomeModuleCounts(patch.homeModuleCounts, settings.homeModuleCounts),
       showHomeLimitBars: parseBoolean(patch.showHomeLimitBars ?? settings.showHomeLimitBars, false),
+      showExactHomeTrendTokens: parseBoolean(patch.showExactHomeTrendTokens ?? settings.showExactHomeTrendTokens, false),
       homeLimitDisplayMode: normalizeHomeLimitDisplayMode(patch.homeLimitDisplayMode ?? settings.homeLimitDisplayMode),
       showHomeLimitProviderNames: parseBoolean(patch.showHomeLimitProviderNames ?? settings.showHomeLimitProviderNames, false),
       homeLimitProviderOrder: patch.homeLimitProviderOrder !== undefined ? migrateHomeLimitProviderOrder(patch.homeLimitProviderOrder) : (settings.homeLimitProviderOrder || ''),
@@ -8342,8 +7849,8 @@ app.whenReady().then(() => {
       projectsEnabled: parseBoolean(patch.projectsEnabled ?? settings.projectsEnabled, true),
       projectBreakdownMode: normalizeProjectBreakdownMode(patch.projectBreakdownMode ?? settings.projectBreakdownMode),
       historyIntervalMs: normalizeHistoryIntervalMs(patch.historyIntervalMs ?? settings.historyIntervalMs),
-      sessionUsageArchiveEnabled: parseBoolean(patch.sessionUsageArchiveEnabled ?? settings.sessionUsageArchiveEnabled, true),
-      wslScanEnabled: parseBoolean(patch.wslScanEnabled ?? settings.wslScanEnabled, true),
+      sessionUsageArchiveEnabled,
+      wslScanEnabled: parseBoolean(patch.wslScanEnabled ?? settings.wslScanEnabled, false),
       collectionMode: normalizeCollectionMode(patch.collectionMode ?? settings.collectionMode),
       collectionIntervalMs: normalizeCollectionIntervalMs(patch.collectionIntervalMs ?? settings.collectionIntervalMs),
       syncUploadIntervalMs: normalizeSyncUploadIntervalMs(patch.syncUploadIntervalMs ?? settings.syncUploadIntervalMs),
@@ -8354,7 +7861,9 @@ app.whenReady().then(() => {
       limitsRefreshMs: normalizeLimitsRefreshMs(patch.limitsRefreshMs ?? settings.limitsRefreshMs),
       showLimitSource: parseBoolean(patch.showLimitSource ?? settings.showLimitSource, false),
       maskLimitAccountEmails: parseBoolean(patch.maskLimitAccountEmails ?? settings.maskLimitAccountEmails, false),
+      limitsHistoryOpenMode: ['hover', 'click', 'off'].includes(patch.limitsHistoryOpenMode ?? settings.limitsHistoryOpenMode) ? (patch.limitsHistoryOpenMode ?? settings.limitsHistoryOpenMode) : 'hover',
       claudePrepaidBalanceEnabled: parseBoolean(patch.claudePrepaidBalanceEnabled ?? settings.claudePrepaidBalanceEnabled, true),
+      claudeCliFallbackEnabled: parseBoolean(patch.claudeCliFallbackEnabled ?? settings.claudeCliFallbackEnabled, true),
       codexResetForecastEnabled: parseBoolean(patch.codexResetForecastEnabled ?? settings.codexResetForecastEnabled, false),
       workbuddyQuotaTotalEnabled: parseBoolean(patch.workbuddyQuotaTotalEnabled ?? settings.workbuddyQuotaTotalEnabled, false),
       showCodexAdditionalLimits: parseBoolean(patch.showCodexAdditionalLimits ?? settings.showCodexAdditionalLimits, true),
@@ -8451,15 +7960,7 @@ app.whenReady().then(() => {
     applyWindowSettings();
     syncFloatingBubbleAvailability();
     syncDockSurfaces();
-    const nextNativeMaterial = nativeBlurEnabled();
-    const nextWindowsBackdrop = normalizeWindowsBackdropMode(settings?.windowsBackdrop);
-    const windowsBackdropChanged = previousWindowsBackdrop !== nextWindowsBackdrop
-      && (previousNativeMaterial || nextNativeMaterial);
-    if (process.platform === 'win32' && (previousNativeMaterial !== nextNativeMaterial || windowsBackdropChanged)) {
-      rebuildWindow();
-    } else {
-      applyNativeMaterial();
-    }
+    applyNativeMaterial();
     const runtimeChange = classifySettingsChange(previousRuntimeSettings, settings);
     const widgetHistorySourceChanged = previousRuntimeSettings.historyEnabled !== settings.historyEnabled;
     if (widgetHistorySourceChanged && !runtimeChange.modeStructural) {
@@ -8564,6 +8065,9 @@ app.whenReady().then(() => {
     if (patch && patch.edgeDockCustomScale !== undefined && edgeDockController?.isRunning()) {
       edgeDockController.previewScale(patch.edgeDockCustomScale);
     }
+    if (patch && patch.edgeDockBubbleCustomScale !== undefined && edgeDockController?.isRunning()) {
+      edgeDockController.previewScale(patch.edgeDockBubbleCustomScale, 'bubble');
+    }
     if (patch && patch.notchCustomScale !== undefined && notchController?.isRunning()) {
       notchController.previewScale(patch.notchCustomScale);
     }
@@ -8571,7 +8075,7 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('settings:displayPreview', (event, surface, phase, slots) => {
     if (event.sender !== mainWindow?.webContents) return null;
-    return require('./displayPreview').buildDisplayPreview(settingsForRenderer(), surface, phase, process.platform, Date.now(), slots);
+    return require('./displayPreview').buildDisplayPreview(settingsForRenderer(), surface, phase, process.platform, Date.now(), slots, pluginRuntime?.limitsSnapshot());
   });
   ipcMain.on('window:viewState', (_event, patch) => {
     updateRendererViewState(patch);
@@ -8706,6 +8210,13 @@ app.whenReady().then(() => {
     }
   });
   ipcMain.handle('stats:allTimeSessions', (_event, snapshotId) => rendererAllTimeSessions(rendererSnapshots.get(snapshotId)));
+  // While a headless agent owns host or sync collection, this app's record stops
+  // updating and the agent applies its own archive, so there is no count to show.
+  ipcMain.handle('stats:archivedSessionCount', () => (
+    settings?.hubMode !== 'icloud' && !canRefreshUsageRuntime(mode, isExternalAgentActive)
+      ? null
+      : localArchivedSessionCount()
+  ));
   ipcMain.handle('export:now', async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openDirectory', 'createDirectory'],
@@ -8867,871 +8378,102 @@ app.whenReady().then(() => {
   ipcMain.handle('appUpdate:download', () => downloadAndPrepareAppUpdate());
   ipcMain.handle('appUpdate:install', () => installDownloadedAppUpdate());
   ipcMain.handle('appUpdate:dismiss', (_event, version) => dismissAppUpdateVersion(version));
-  ipcMain.handle('cursor:loginManual', async (_event, raw) => {
-    if (isExternalAgentActive()) {
-      return { ok: false, code: 'EXTERNAL_AGENT_ACTIVE', error: CURSOR_EXTERNAL_AGENT_ERROR };
-    }
-    const token = normalizeManualCookie(raw);
-    if (!token) return { ok: false, error: 'Empty or malformed token' };
-    try {
-      const probeResult = await cursorProbe.probe(token);
-      if (!probeResult.ok) return { ok: false, error: probeResult.error?.message || 'Cursor rejected the token' };
-      const accountId = await cursorAuth.runCursorLogin(token);
-      const disabled = normalizeCursorDisabledAccountIds(settings.cursorDisabledAccountIds)
-        .filter((id) => id !== accountId);
-      const limitsChanged = disabled.length !== settings.cursorDisabledAccountIds.length;
-      settings.cursorDisabledAccountIds = disabled;
-      settings.cursorManualAccountIds = normalizeCursorAccountIds([
-        ...settings.cursorManualAccountIds,
-        accountId
-      ]);
-      saveSettings({ throwOnError: true });
-      if (limitsChanged) {
-        deviceRuntimeHandle?.reconfigureLimits(electronLimitsConfig());
-      }
-      cursorStatusCache = { value: null, at: 0 };
-      void queueLimitInvalidation({ provider: 'cursor' }, 'login', { clear: true });
-      bestEffortTrackedUsageRefresh('cursor', { forceSync: true });
-      return { ok: true, email: probeResult.user.email, status: await cursorStatusValue() };
-    } catch (err) {
-      return { ok: false, error: err.message };
-    }
-  });
+  ipcMain.handle('cursor:loginManual', (_event, ...args) => cursorAccountService().loginManual(...args));
   ipcMain.handle('claude:accounts', () => claudeAccountService().accounts());
   ipcMain.handle('claude:saveWebAccount', (_event, values) => claudeAccountService().saveAccount(values));
   ipcMain.handle('claude:removeWebAccount', (_event, id) => claudeAccountService().removeAccount(String(id || '')));
   ipcMain.handle('claude:setAccountEnabled', (_event, id, enabled) => claudeAccountService().setAccountEnabled(String(id || ''), enabled));
-  ipcMain.handle('limits:saveCredential', (_event, providerId, values) => credentialCommands.saveCredential(providerId, values));
+  // Claude managed accounts have their own IPC. This form serves the legacy Web lane.
+  ipcMain.handle('limits:saveCredential', (_event, providerId, values) => providerId !== 'claude' && ACCOUNT_SLOT_PROVIDER_IDS.has(providerId) && !credentialCommands.hasRetainedCredential(providerId) ? accountSlotService.add(providerId, values) : credentialCommands.saveCredential(providerId, values));
+  getLimitsHistoryController().register();
   ipcMain.handle('limits:listOrganizationChoices', (_event, providerId) => credentialCommands.listOrganizationChoices(providerId));
   ipcMain.handle('limits:clearCredential', (_event, providerId) => credentialCommands.clearCredential(providerId));
   // Explicit panel refreshes collect only their provider. Save and clear reuse
-  // the refresh scheduled by the credential settings write above.
-  ipcMain.handle('limits:refresh', async (_event, providerId) => {
-    const provider = String(providerId || '').trim();
-    const parsed = parseLimitProviders(provider);
-    if (parsed.length !== 1 || parsed[0] !== provider) return { ok: false, error: 'unknown provider' };
-    if (!deviceRuntimeHandle) return { ok: false, error: 'limits runtime is not ready' };
-    try {
-      await runLimitInvalidation(deviceRuntimeHandle, { provider }, 'account-panel', { clear: false });
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, error: error?.message || String(error) };
-    }
-  });
-  ipcMain.handle('opencode:saveCookie', async (_event, raw) => {
-    const cookie = opencodeWeb.sanitizeCookieHeader(raw, '__Host-console_session');
-    if (!cookie) {
-      settings.opencodeProfiles = {};
-      settings.opencodeCookie = '';
-      try {
-        saveSettings({ throwOnError: true });
-      } catch (error) {
-        return { ok: false, error: error?.message || 'Could not persist OpenCode credentials' };
-      }
-      opencodeStatusCache = { value: null, at: 0 };
-      void queueLimitInvalidation({ provider: 'opencode' }, 'logout', { clear: true });
-      return { ok: true, cleared: true };
-    }
-    try {
-      const [go, zen] = await opencodeWeb.fetchWeb(cookie, electronProviderDeps());
-      if (opencodeWeb.summarizeLink(go, zen).expired) {
-        return { ok: false, error: 'OpenCode rejected the cookie (it may be expired)' };
-      }
-      const profiles = settings.opencodeProfiles || {};
-      profiles.default = { cookie, enabled: true };
-      settings.opencodeProfiles = profiles;
-      settings.opencodeCookie = cookie;
-      saveSettings({ throwOnError: true });
-      opencodeStatusCache = { value: null, at: 0 };
-      void queueLimitInvalidation({ provider: 'opencode' }, 'credential-save', { clear: true });
-      return { ok: true };
-    } catch (err) {
-      return { ok: false, error: err.message };
-    }
-  });
-  ipcMain.handle('cursor:setAccountEnabled', async (_event, accountId, enabled) => {
-    try {
-      const id = String(accountId || '').trim();
-      if (!id || !cursorAuth.listAccounts().some((account) => account.id === id)) {
-        return { ok: false, error: 'Cursor account not found' };
-      }
-      const disabled = new Set(normalizeCursorDisabledAccountIds(settings.cursorDisabledAccountIds));
-      if (enabled) disabled.delete(id);
-      else disabled.add(id);
-      settings.cursorDisabledAccountIds = [...disabled];
-      saveSettings({ throwOnError: true });
-      cursorStatusCache = { value: null, at: 0 };
-      deviceRuntimeHandle?.reconfigureLimits(electronLimitsConfig());
-      void queueLimitInvalidation({ provider: 'cursor' }, 'account-toggle', { clear: true });
-      return { ok: true, status: await cursorStatusValue() };
-    } catch (err) {
-      return { ok: false, error: err.message };
-    }
-  });
-  ipcMain.handle('cursor:logout', async (_event, accountId) => {
-    if (isExternalAgentActive()) {
-      return { ok: false, code: 'EXTERNAL_AGENT_ACTIVE', error: CURSOR_EXTERNAL_AGENT_ERROR };
-    }
-    try {
-      const removeId = String(accountId || '').trim();
-      const manual = new Set(normalizeCursorAccountIds(settings.cursorManualAccountIds));
-      if (!removeId || !manual.has(removeId)) {
-        return { ok: false, error: 'Only manually added Cursor accounts can be removed' };
-      }
-      await cursorAuth.runCursorLogout({ accountId: removeId });
-      const disabled = normalizeCursorDisabledAccountIds(settings.cursorDisabledAccountIds)
-        .filter((id) => id !== removeId);
-      const limitsChanged = disabled.length !== settings.cursorDisabledAccountIds.length;
-      settings.cursorDisabledAccountIds = disabled;
-      settings.cursorManualAccountIds = [...manual].filter((id) => id !== removeId);
-      saveSettings({ throwOnError: true });
-      if (limitsChanged) {
-        deviceRuntimeHandle?.reconfigureLimits(electronLimitsConfig());
-      }
-      cursorStatusCache = { value: null, at: 0 };
-      void queueLimitInvalidation({ provider: 'cursor' }, 'logout', { clear: true });
-      bestEffortTrackedUsageRefresh('cursor', { forceSync: true });
-      return { ok: true, status: await cursorStatusValue() };
-    } catch (err) {
-      return { ok: false, error: err.message };
-    }
-  });
-  ipcMain.handle('opencode:logout', async () => {
-    try {
-      settings.opencodeProfiles = {};
-      settings.opencodeCookie = '';
-      saveSettings({ throwOnError: true });
-      opencodeStatusCache = { value: null, at: 0 };
-      void queueLimitInvalidation({ provider: 'opencode' }, 'logout', { clear: true });
-      return { ok: true };
-    } catch (err) {
-      return { ok: false, error: err.message };
-    }
-  });
-  ipcMain.handle('cursor:status', async (_event, options = {}) => {
-    const now = Date.now();
-    if (options?.force !== true && options?.discover !== true && cursorStatusCache.value && now - cursorStatusCache.at < CURSOR_STATUS_TTL_MS) {
-      return cursorStatusCache.value;
-    }
-    const value = await cursorStatusValue({ discover: options?.discover === true });
-    cursorStatusCache = { value, at: now };
-    return value;
-  });
-  ipcMain.handle('opencode:status', async () => {
-    const now = Date.now();
-    if (opencodeStatusCache.value && now - opencodeStatusCache.at < CURSOR_STATUS_TTL_MS) {
-      return opencodeStatusCache.value;
-    }
-    const profiles = settings.opencodeProfiles || {};
-    // A profile that only names the auto-detected key stores no credential of
-    // its own, so filtering on `cookie || apiKey` alone would skip it and leave
-    // its row stuck on the placeholder while the collector reads live quota
-    // from that very key. Resolve the key the same way the collector does.
-    const ambientKey = opencodeGoApi.readGoApiKey(process.env);
-    const ambientIdentity = ambientKey ? opencodeGoApi.goApiIdentity(ambientKey) : '';
-    const profileKey = (p) => p.apiKey || opencodeProfiles.ambientKeyFor(p, ambientKey, ambientIdentity);
-    // A reference that no longer resolves still has to answer for its row. It
-    // has a credential the user stored, so filtering it out here would leave the
-    // row on its placeholder forever with nothing saying what to do about it.
-    const needsRebind = (p) => Boolean(p.useAmbientKey) && !profileKey(p) && !p.cookie;
-    const entries = Object.entries(profiles)
-      .filter(([, p]) => (p.cookie || profileKey(p) || needsRebind(p)) && p.enabled);
-
-    // Query all profiles in parallel
-    const results = await Promise.all(
-      entries.map(async ([name, profile]) => {
-        const apiKey = profileKey(profile);
-        if (needsRebind(profile)) {
-          return [name, {
-            linked: false,
-            expired: false,
-            go: false,
-            zen: false,
-            hasBalance: false,
-            balanceUsd: null,
-            needsRebind: true
-          }];
-        }
-        // An API key reaches Go quota and nothing else, so it reports the same
-        // shape as a cookie with the Zen half permanently absent. Without this
-        // branch an API account is never probed and the panel sits at "0/1".
-        // Only a cookie account can be probed for Zen, so a profile holding both
-        // falls through to the cookie path and its key is used by the collector.
-        if (apiKey && !profile.cookie) {
-          const probe = await probeOpenCodeApiKey(apiKey);
-          // The renderer checks `linked` before `error`, so anything short of a
-          // working key must not claim linked or it renders a bare "✓" with no
-          // plan behind it.
-          if (probe.status === 'ok') {
-            return [name, { linked: true, expired: false, go: true, zen: false, hasBalance: false, balanceUsd: null }];
-          }
-          if (probe.status === 'unauthorized') {
-            return [name, { linked: true, expired: true, go: false, zen: false, hasBalance: false, balanceUsd: null }];
-          }
-          return [name, {
-            linked: false,
-            expired: false,
-            go: false,
-            zen: false,
-            hasBalance: false,
-            balanceUsd: null,
-            error: probe.status
-          }];
-        }
-        const [[go, zen], apiProbe] = await Promise.all([
-          opencodeWeb.fetchWeb(profile.cookie, electronProviderDeps(), { isolateErrors: true }),
-          apiKey ? probeOpenCodeApiKey(apiKey) : null
-        ]);
-        const summary = { ...opencodeWeb.summarizeLink(go, zen), balanceUsd: zen.balanceUsd };
-        // A bound key answers for Go on its own, so the row must not read as
-        // expired just because the cookie half died: the collector still has
-        // quota, and only the Zen balance is actually missing.
-        if (apiProbe?.status === 'ok') {
-          summary.go = true;
-          summary.linked = true;
-          summary.expired = false;
-          delete summary.error;
-        }
-        return [name, summary];
-      })
-    );
-
-    const result = Object.fromEntries(results);
-
-    // Legacy env cookie. Skip it when it matches an enabled profile so the
-    // panel doesn't report an extra "connected" account that the collector
-    // dedupes away (otherwise it shows 2/2 while only one account is tracked).
-    const envCookie = process.env.TOKEN_MONITOR_OPENCODE_COOKIE || '';
-    if (envCookie && !entries.some(([, p]) => p.cookie === envCookie)) {
-      const [go, zen] = await opencodeWeb.fetchWeb(envCookie, electronProviderDeps(), { isolateErrors: true });
-      let envKey = 'env';
-      for (let i = 1; Object.prototype.hasOwnProperty.call(profiles, envKey); i += 1) {
-        envKey = `env:${i}`;
-      }
-      result[envKey] = { ...opencodeWeb.summarizeLink(go, zen), balanceUsd: zen.balanceUsd, env: true };
-    }
-    // Zero configuration still has an account behind it. Without probing the key
-    // OpenCode stored for itself, the panel reports "not set up" while the limits
-    // card is showing live quota read from that very key.
-    //
-    // It rides in its own field rather than under a reserved name inside
-    // `profiles`: account names are user-chosen, so any sentinel key is one a
-    // user can also type, and the synthetic entry would then overwrite their
-    // account's real status (and collide with its DOM id in the renderer).
-    let ambient = null;
-    if (opencodeAmbientKeyActive(profiles) && settings.opencodeAmbientEnabled === false) {
-      ambient = { linked: false, expired: false, go: false, zen: false, hasBalance: false, balanceUsd: null, ambient: true, disabled: true };
-    } else if (opencodeAmbientKeyActive(profiles)) {
-      const probe = await probeOpenCodeApiKey(opencodeGoApi.readGoApiKey(process.env));
-      ambient = {
-        linked: probe.status === 'ok',
-        expired: probe.status === 'unauthorized',
-        go: probe.status === 'ok',
-        zen: false,
-        hasBalance: false,
-        balanceUsd: null,
-        ambient: true,
-        ...(probe.status === 'ok' || probe.status === 'unauthorized' ? {} : { error: probe.status })
-      };
-    }
-    const value = {
-      profiles: result,
-      ambient,
-      linked: Object.values(result).some(s => s.linked) || Boolean(ambient?.linked)
-    };
-    opencodeStatusCache = { value, at: now };
-    return value;
-  });
-  ipcMain.handle('opencode:getProfiles', async () => {
-    const profiles = settings.opencodeProfiles || {};
-    // The Go quota also arrives with no configuration at all, from the key
-    // OpenCode itself stores. Without counting that, the panel reports "not set
-    // up" while the limits card is showing live API data from the same account.
-    const hasEnvVar = Boolean(process.env.TOKEN_MONITOR_OPENCODE_COOKIE);
-    // Kept as its own field rather than folded into hasEnvVar: an environment
-    // cookie and a key OpenCode stored for itself are different sources, and a
-    // later reader seeing hasEnvVar would reasonably assume the former.
-    const hasAmbientKey = opencodeAmbientKeyActive(profiles);
-    // Credential values never cross to the renderer; which kinds exist does, so
-    // the list can show what a profile actually holds.
-    const ambientKey = opencodeGoApi.readGoApiKey(process.env);
-    const ambientIdentity = ambientKey ? opencodeGoApi.goApiIdentity(ambientKey) : '';
-    // Keyed on user-typed names, so it must not inherit one. Structured clone
-    // hands the renderer a plain object either way.
-    const safe = Object.create(null);
-    for (const [name, p] of Object.entries(profiles)) {
-      safe[name] = {
-        enabled: p.enabled,
-        hasApiKey: Boolean(p.apiKey),
-        hasCookie: Boolean(p.cookie),
-        usesAmbientKey: Boolean(p.useAmbientKey),
-        // Held but not resolving, because the key it was bound to is no longer
-        // the one on this machine. Without saying so the list shows the
-        // credential as present while the collector ignores it, and on an
-        // account that also has a cookie nothing else would reveal it.
-        ambientStale: Boolean(p.useAmbientKey)
-          && !opencodeProfiles.ambientKeyFor(p, ambientKey, ambientIdentity)
-      };
-    }
-    return {
-      profiles: safe,
-      hasEnvVar,
-      hasAmbientKey,
-      ambientEnabled: settings.opencodeAmbientEnabled !== false
-    };
-  });
+  // the refresh scheduled by the credential settings write above. A quota row's
+  // own refresh button also names its account, which narrows the probe to that
+  // account where the provider supports it.
+  ipcMain.handle('limits:probes', settingsLimitState);
+  ipcMain.handle('limits:refresh', (_event, providerId, account) => refreshLimitProvider(providerId, account));
+  ipcMain.handle('opencode:saveCookie', (_event, ...args) => opencodeAccountService().saveCookie(...args));
+  ipcMain.handle('cursor:setAccountEnabled', (_event, ...args) => cursorAccountService().setAccountEnabled(...args));
+  ipcMain.handle('cursor:logout', (_event, ...args) => cursorAccountService().logout(...args));
+  ipcMain.handle('opencode:logout', (_event, ...args) => opencodeAccountService().logout(...args));
+  ipcMain.handle('cursor:status', (_event, ...args) => cursorAccountService().status(...args));
+  ipcMain.handle('opencode:status', (_event, ...args) => opencodeAccountService().status(...args));
+  ipcMain.handle('opencode:getProfiles', (_event, ...args) => opencodeAccountService().getProfiles(...args));
   // `kind` defaults to 'cookie' so an older renderer calling with two arguments
   // keeps its existing behavior.
-  ipcMain.handle('opencode:saveProfile', async (_event, name, raw, kind = 'cookie', options = {}) => {
-    // Trimmed, so whitespace cannot create an account name that renders blank
-    // and that nobody could ever type again to attach a second credential.
-    name = String(name || '').trim();
-    if (!name) return { ok: false, error: 'Empty name' };
-    // Reject anything else rather than treating it as a cookie: an unrecognized
-    // kind would store the value in the wrong field and read as a credential it
-    // is not.
-    if (!['api', 'cookie', 'ambient'].includes(kind)) {
-      return { ok: false, error: `Unknown credential kind: ${kind}` };
-    }
-    try {
-      let credential;
-      if (kind === 'ambient') {
-        // Naming the auto-detected credential. A reference is stored, never the
-        // key itself, so the key is re-read every tick rather than going stale
-        // at 401 behind a snapshot.
-        const ambientKey = opencodeGoApi.readGoApiKey(process.env);
-        if (!ambientKey) {
-          return { ok: false, error: 'No OpenCode credential found on this machine' };
-        }
-        // Records which account the reference was bound to, so a key that later
-        // changes stops resolving here instead of quietly pairing whoever is
-        // signed in next with this account's cookie. It is a digest, not the
-        // key: the value itself is never stored for this credential kind.
-        credential = {
-          useAmbientKey: true,
-          ambientKeyIdentity: opencodeGoApi.goApiIdentity(ambientKey)
-        };
-      } else if (kind === 'api') {
-        const apiKey = String(raw || '').trim();
-        if (!apiKey) return { ok: false, error: 'Empty API key' };
-        const probe = await probeOpenCodeApiKey(apiKey);
-        if (probe.status === 'unauthorized') {
-          return { ok: false, error: 'OpenCode rejected the API key' };
-        }
-        // The key authenticates but the workspace has no Go plan, so this
-        // profile would render permanently empty. Say so instead of saving it.
-        if (probe.status === 'notConfigured') {
-          return { ok: false, error: 'That account has no OpenCode Go subscription' };
-        }
-        if (probe.status !== 'ok') {
-          return { ok: false, error: 'Could not reach the OpenCode usage API' };
-        }
-        credential = { apiKey };
-      } else {
-        const cookie = opencodeWeb.sanitizeCookieHeader(raw, '__Host-console_session');
-        if (!cookie) return { ok: false, error: 'Empty cookie' };
-        const [go, zen] = await opencodeWeb.fetchWeb(cookie, electronProviderDeps());
-        if (opencodeWeb.summarizeLink(go, zen).expired) {
-          return { ok: false, error: 'OpenCode rejected the cookie (it may be expired)' };
-        }
-        credential = { cookie };
-      }
-      // Saving one credential replaces only that kind and keeps the others. Two
-      // kinds under one profile name is how a user says "these are the same
-      // account", which is the only thing that licenses reading Go quota from
-      // the key while Zen balance comes from the cookie. Nothing associates them
-      // automatically — same machine is not evidence of same account — so the
-      // binding is refused here until the caller confirms it, whichever UI path
-      // asked. A blur that happens to land on an existing name must not be able
-      // to make that claim on the user's behalf.
-      const ambientWasActive = opencodeAmbientKeyActive(settings.opencodeProfiles || {});
-      const result = opencodeProfiles.saveCredential(
-        settings.opencodeProfiles || {},
-        name,
-        credential,
-        { merge: options.merge === true }
-      );
-      if (!result.ok) return result;
-      settings.opencodeProfiles = result.profiles;
-      saveSettings({ throwOnError: true });
-      opencodeStatusCache = { value: null, at: 0 };
-      void queueLimitInvalidation({ provider: 'opencode', accountName: name }, 'profile-save');
-      refreshOpencodeAmbientOwnership(ambientWasActive);
-      return { ok: true };
-    } catch (err) {
-      return { ok: false, error: err.message };
-    }
-  });
-  ipcMain.handle('opencode:deleteProfile', async (_event, name) => {
-    const profiles = settings.opencodeProfiles || {};
-    const ambientWasActive = opencodeAmbientKeyActive(profiles);
-    const deletedProfile = opencodeProfiles.readProfile(profiles, name);
-    delete profiles[name];
-    if (deletedProfile?.cookie && settings.opencodeCookie === deletedProfile.cookie) {
-      settings.opencodeCookie = '';
-    }
-    settings.opencodeProfiles = profiles;
-    try {
-      saveSettings({ throwOnError: true });
-    } catch (error) {
-      return { ok: false, error: error?.message || 'Could not persist OpenCode profile deletion' };
-    }
-    opencodeStatusCache = { value: null, at: 0 };
-    void queueLimitInvalidation({ provider: 'opencode', accountName: name }, 'profile-delete', {
-      clear: true,
-      refresh: false
-    });
-    refreshOpencodeAmbientOwnership(ambientWasActive);
-    return { ok: true };
-  });
+  ipcMain.handle('opencode:saveProfile', (_event, ...args) => opencodeAccountService().saveProfile(...args));
+  ipcMain.handle('opencode:deleteProfile', (_event, ...args) => opencodeAccountService().deleteProfile(...args));
   // Removes one credential from an account, leaving the others. Deleting the
   // account removes all of them; this is how a binding is undone without
   // losing the credential the user wanted to keep.
-  ipcMain.handle('opencode:removeCredential', async (_event, name, kind) => {
-    const ambientWasActive = opencodeAmbientKeyActive(settings.opencodeProfiles || {});
-    const result = opencodeProfiles.removeCredential(settings.opencodeProfiles || {}, name, kind);
-    if (!result.ok) return result;
-    if (result.removedCookie && settings.opencodeCookie === result.removedCookie) {
-      settings.opencodeCookie = '';
-    }
-    settings.opencodeProfiles = result.profiles;
-    try {
-      saveSettings({ throwOnError: true });
-    } catch (error) {
-      return { ok: false, error: error?.message || 'Could not persist OpenCode credential removal' };
-    }
-    opencodeStatusCache = { value: null, at: 0 };
-    void queueLimitInvalidation({ provider: 'opencode', accountName: name }, 'credential-remove', {
-      clear: true
-    });
-    refreshOpencodeAmbientOwnership(ambientWasActive);
-    return { ok: true };
-  });
+  ipcMain.handle('opencode:removeCredential', (_event, ...args) => opencodeAccountService().removeCredential(...args));
   // Moves one credential to another account name, creating it when needed. This
   // is what "rename a credential" means in a model where the name is the
   // account: moving it to a fresh name splits it off, moving it onto an
   // existing name binds it there. The value never crosses to the renderer.
-  ipcMain.handle('opencode:moveCredential', async (_event, name, kind, targetName, options = {}) => {
-    const ambientWasActive = opencodeAmbientKeyActive(settings.opencodeProfiles || {});
-    const result = opencodeProfiles.moveCredential(
-      settings.opencodeProfiles || {},
-      name,
-      kind,
-      targetName,
-      { merge: options.merge === true }
-    );
-    if (!result.ok) return result;
-    if (result.unchanged) return { ok: true };
-    const target = String(targetName || '').trim();
-    settings.opencodeProfiles = result.profiles;
-    try {
-      saveSettings({ throwOnError: true });
-    } catch (error) {
-      return { ok: false, error: error?.message || 'Could not persist OpenCode credential move' };
-    }
-    opencodeStatusCache = { value: null, at: 0 };
-    for (const account of [name, target]) {
-      void queueLimitInvalidation({ provider: 'opencode', accountName: account }, 'credential-move', {
-        clear: true
-      });
-    }
-    refreshOpencodeAmbientOwnership(ambientWasActive);
-    return { ok: true };
-  });
+  ipcMain.handle('opencode:moveCredential', (_event, ...args) => opencodeAccountService().moveCredential(...args));
   // `merge` is the caller confirming that renaming onto an existing account
   // asserts the two are the same OpenCode account — the same claim as saving a
   // second credential under one name, and the only thing that licenses reading
   // quota from one credential while identity comes from another. Without it an
   // existing name is refused, so the assertion is never made by accident.
-  ipcMain.handle('opencode:renameProfile', async (_event, oldName, newName, options = {}) => {
-    const ambientWasActive = opencodeAmbientKeyActive(settings.opencodeProfiles || {});
-    const result = opencodeProfiles.renameProfile(
-      settings.opencodeProfiles || {},
-      oldName,
-      newName,
-      { merge: options.merge === true }
-    );
-    if (!result.ok) return result;
-    settings.opencodeProfiles = result.profiles;
-    try {
-      saveSettings({ throwOnError: true });
-    } catch (error) {
-      return { ok: false, error: error?.message || 'Could not persist OpenCode profile rename' };
-    }
-    opencodeStatusCache = { value: null, at: 0 };
-    void queueLimitInvalidation({ provider: 'opencode', accountName: oldName }, 'profile-rename', {
-      clear: true,
-      refresh: false
-    });
-    void queueLimitInvalidation({ provider: 'opencode', accountName: newName }, 'profile-rename');
-    refreshOpencodeAmbientOwnership(ambientWasActive);
-    return { ok: true };
-  });
-  ipcMain.handle('opencode:setProfileEnabled', async (_event, name, enabled) => {
-    const profiles = settings.opencodeProfiles || {};
-    // Own properties only. An inherited key resolves to an object that is not an
-    // account, and writing `enabled` onto it would reach whatever else shares
-    // that prototype.
-    const profile = opencodeProfiles.readProfile(profiles, name);
-    if (!profile) return { ok: false, error: 'Profile not found' };
-    profile.enabled = Boolean(enabled);
-    settings.opencodeProfiles = profiles;
-    try {
-      saveSettings({ throwOnError: true });
-    } catch (error) {
-      return { ok: false, error: error?.message || 'Could not persist OpenCode profile state' };
-    }
-    opencodeStatusCache = { value: null, at: 0 };
-    void queueLimitInvalidation({ provider: 'opencode', accountName: name }, 'profile-state', {
-      clear: !enabled,
-      refresh: Boolean(enabled)
-    });
-    return { ok: true };
-  });
+  ipcMain.handle('opencode:renameProfile', (_event, ...args) => opencodeAccountService().renameProfile(...args));
+  ipcMain.handle('opencode:setProfileEnabled', (_event, ...args) => opencodeAccountService().setProfileEnabled(...args));
   // The auto-detected account has no stored record to carry an enabled flag, so
   // its switch is a device preference rather than a credential. Writing one
   // instead would mean a toggle that creates an account under a name the user
   // can also type, cannot be undone symmetrically once that account is edited,
   // and quietly comes back enabled when the key it pinned is rotated.
-  ipcMain.handle('opencode:setAmbientEnabled', async (_event, enabled) => {
-    settings.opencodeAmbientEnabled = enabled !== false;
-    try {
-      saveSettings({ throwOnError: true });
-    } catch (error) {
-      return { ok: false, error: error?.message || 'Could not persist the OpenCode detection setting' };
-    }
-    opencodeStatusCache = { value: null, at: 0 };
-    // Provider-wide, for the same reason every ownership change is: this row has
-    // no account name for a scoped refresh to address. It must still refresh
-    // afterwards. Clearing without one wipes every OpenCode account and rebuilds
-    // none of them, so switching off the detected key read as switching off the
-    // whole provider — the rest of the accounts are unaffected by this setting
-    // and have to come straight back.
-    void queueLimitInvalidation({ provider: 'opencode' }, 'ambient-toggle', { clear: true });
-    return { ok: true };
-  });
-  ipcMain.handle('openrouter:getProfiles', async () => {
-    return {
-      profiles: redactOpenRouterProfilesForRenderer(settings.openrouterProfiles || {}),
-      hasEnvVar: Boolean(openrouterLimits.openrouterToken(process.env))
-    };
-  });
-  ipcMain.handle('openrouter:saveProfile', async (_event, rawName, rawApiKey) => {
-    const name = openrouterLimits.openrouterProfileName(rawName);
-    const apiKey = openrouterLimits.openrouterToken({}, rawApiKey);
-    if (!name) return { ok: false, errorCode: 'invalidName' };
-    if (!apiKey) return { ok: false, errorCode: 'missingApiKey' };
-    try {
-      const provider = await openrouterLimits.fetchOpenRouterAccount(name, apiKey, electronProviderDeps({
-        env: process.env,
-        signal: AbortSignal.timeout(15_000)
-      }));
-      if (provider?.status !== 'ok') {
-        return { ok: false, error: provider?.status === 'unauthorized' ? 'OpenRouter rejected the API key' : 'Could not validate the OpenRouter API key' };
-      }
-      settings.openrouterProfiles = {
-        ...(settings.openrouterProfiles || {}),
-        [name]: { apiKey, enabled: true }
-      };
-      saveSettings({ throwOnError: true });
-      void queueLimitInvalidation({ provider: 'openrouter', accountName: name }, 'profile-save');
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, error: error?.message || 'Could not validate the OpenRouter API key' };
+  ipcMain.handle('opencode:setAmbientEnabled', (_event, ...args) => opencodeAccountService().setAmbientEnabled(...args));
+  const minimaxApiKeys = createMinimaxApiKeys({
+    slotPersistence: ordinarySlotPersistence('minimax'),
+    getSettings: () => settings, saveSettings,
+    probeDeps: () => electronProviderDeps({ env: {}, signal: AbortSignal.timeout(15_000) }),
+    changed: (accountKey, refresh, reason) => {
+      credentialCommands.noteSettingsPatch({ minimaxApiKey: '' });
+      deviceRuntimeHandle?.reconfigureLimits(electronLimitsConfig());
+      void queueLimitInvalidation({ provider: 'minimax', source: 'api', accountKey }, reason, { clear: true, refresh });
+      pushSettingsToRenderer();
     }
   });
-  ipcMain.handle('openrouter:deleteProfile', async (_event, rawName) => {
-    const name = String(rawName || '').trim();
-    const profiles = { ...(settings.openrouterProfiles || {}) };
-    if (!profiles[name]) return { ok: false, error: 'Profile not found' };
-    delete profiles[name];
-    settings.openrouterProfiles = profiles;
-    try {
-      saveSettings({ throwOnError: true });
-    } catch (error) {
-      return { ok: false, error: error?.message || 'Could not persist OpenRouter profile deletion' };
-    }
-    void queueLimitInvalidation({ provider: 'openrouter', accountName: name }, 'profile-delete', {
-      clear: true,
-      refresh: false
+  ipcMain.handle('minimax:getKeys', () => minimaxApiKeys.getKeys());
+  for (const method of ['addKey', 'removeKey']) {
+    ipcMain.handle(`minimax:${method}`, async (_event, ...args) => {
+      try { return await minimaxApiKeys[method](...args); }
+      catch (error) { return { ok: false, error: error?.message || 'Could not save MiniMax API key' }; }
     });
-    return { ok: true };
-  });
-  ipcMain.handle('openrouter:renameProfile', async (_event, rawOldName, rawNewName) => {
-    const oldName = String(rawOldName || '').trim();
-    const newName = openrouterLimits.openrouterProfileName(rawNewName);
-    const profiles = { ...(settings.openrouterProfiles || {}) };
-    if (!newName || oldName === newName) return { ok: false, errorCode: 'invalidName' };
-    if (!profiles[oldName]) return { ok: false, error: 'Profile not found' };
-    if (profiles[newName]) return { ok: false, error: 'Profile name already exists' };
-    profiles[newName] = profiles[oldName];
-    delete profiles[oldName];
-    settings.openrouterProfiles = profiles;
-    try {
-      saveSettings({ throwOnError: true });
-    } catch (error) {
-      return { ok: false, error: error?.message || 'Could not persist OpenRouter profile rename' };
-    }
-    void queueLimitInvalidation({ provider: 'openrouter', accountName: oldName }, 'profile-rename', {
-      clear: true,
-      refresh: false
-    });
-    void queueLimitInvalidation({ provider: 'openrouter', accountName: newName }, 'profile-rename');
-    return { ok: true };
-  });
-  ipcMain.handle('openrouter:setProfileEnabled', async (_event, rawName, enabled) => {
-    const name = String(rawName || '').trim();
-    const profiles = { ...(settings.openrouterProfiles || {}) };
-    if (!profiles[name]) return { ok: false, error: 'Profile not found' };
-    profiles[name] = { ...profiles[name], enabled: Boolean(enabled) };
-    settings.openrouterProfiles = profiles;
-    try {
-      saveSettings({ throwOnError: true });
-    } catch (error) {
-      return { ok: false, error: error?.message || 'Could not persist OpenRouter profile state' };
-    }
-    void queueLimitInvalidation({ provider: 'openrouter', accountName: name }, 'profile-state', {
-      clear: !enabled,
-      refresh: Boolean(enabled)
-    });
-    return { ok: true };
-  });
-  ipcMain.handle('thirdparty:getProfiles', async () => {
-    return {
-      profiles: redactThirdPartyProfilesForRenderer(settings.thirdPartyProfiles || {}),
-      hasEnvVar: thirdPartyLimits.configuredAccounts({}, { env: process.env }).length > 0
-    };
-  });
-  ipcMain.handle('thirdparty:saveProfile', async (_event, rawProfile = {}) => {
-    const name = thirdPartyLimits.thirdPartyProfileName(rawProfile.name);
-    const adapter = thirdPartyLimits.normalizeAdapterId(rawProfile.adapter);
-    const customAdapter = adapter === thirdPartyLimits.CUSTOM_BALANCE_ADAPTER;
-    const baseUrl = thirdPartyLimits.normalizeThirdPartyBaseUrl(rawProfile.baseUrl, {
-      stripTerminalV1: !customAdapter
-    });
-    if (!name) return { ok: false, errorCode: 'invalidName' };
-    if (!adapter) return { ok: false, errorCode: 'invalidAdapter' };
-    if (!baseUrl) return { ok: false, errorCode: 'invalidBaseUrl' };
-    if (
-      adapter === thirdPartyLimits.NEWAPI_ACCOUNT_ADAPTER
-      && !thirdPartyLimits.newapiAccessToken({}, rawProfile.accessToken)
-    ) return { ok: false, errorCode: 'missingAccessToken' };
-    if (
-      adapter === thirdPartyLimits.SUB2API_ADAPTER
-      && !thirdPartyLimits.newapiAccessToken({}, rawProfile.accessToken)
-    ) return { ok: false, errorCode: 'missingAccessToken' };
-    if (
-      [thirdPartyLimits.NEWAPI_TOKEN_ADAPTER, thirdPartyLimits.CUSTOM_BALANCE_ADAPTER].includes(adapter)
-      && !thirdPartyLimits.newapiApiKey({}, rawProfile.apiKey)
-    ) return { ok: false, errorCode: 'missingApiKey' };
-    if (
-      customAdapter
-      && !thirdPartyLimits.normalizeCustomEndpointPath(rawProfile.endpointPath)
-    ) return { ok: false, errorCode: 'invalidEndpointPath' };
-    if (
-      customAdapter
-      && !thirdPartyLimits.normalizeCustomAuthMode(rawProfile.authMode)
-    ) return { ok: false, errorCode: 'invalidAuthMode' };
-    if (
-      customAdapter
-      && (
-        !thirdPartyLimits.normalizeCustomJsonPath(rawProfile.remainingPath)
-        || (
-          String(rawProfile.usedPath || '').trim()
-          && !thirdPartyLimits.normalizeCustomJsonPath(rawProfile.usedPath)
-        )
-        || (
-          String(rawProfile.totalPath || '').trim()
-          && !thirdPartyLimits.normalizeCustomJsonPath(rawProfile.totalPath)
-        )
-      )
-    ) return { ok: false, errorCode: 'invalidJsonPath' };
-    if (
-      customAdapter
-      && !thirdPartyLimits.normalizeCustomCurrency(rawProfile.currency)
-    ) return { ok: false, errorCode: 'invalidCurrency' };
-    if (
-      customAdapter
-      && thirdPartyLimits.normalizeCustomDivisor(rawProfile.divisor) === null
-    ) return { ok: false, errorCode: 'invalidDivisor' };
-    const profile = thirdPartyLimits.normalizeThirdPartyProfile({
-      ...rawProfile,
-      adapter,
-      baseUrl,
-      enabled: true
-    });
-    if (!profile) return { ok: false, errorCode: 'invalidCredential' };
-    try {
-      const provider = await thirdPartyLimits.fetchThirdPartyAccount({ name, ...profile }, electronProviderDeps({
-        env: process.env,
-        signal: AbortSignal.timeout(15_000)
-      }));
-      if (provider?.status !== 'ok') {
-        return {
-          ok: false,
-          errorCode: provider?.status === 'unauthorized' ? 'invalidCredential' : 'unavailable'
-        };
-      }
-      const storedProfile = thirdPartyProfileWithCanonicalIdentity(profile, provider) || profile;
-      settings.thirdPartyProfiles = {
-        ...(settings.thirdPartyProfiles || {}),
-        [name]: storedProfile
-      };
-      saveSettings({ throwOnError: true });
-      void queueLimitInvalidation({ provider: 'thirdparty', accountName: name }, 'profile-save');
-      return { ok: true };
-    } catch (_) {
-      return { ok: false, errorCode: 'unavailable' };
-    }
-  });
-  ipcMain.handle('thirdparty:deleteProfile', async (_event, rawName) => {
-    const name = String(rawName || '').trim();
-    const profiles = { ...(settings.thirdPartyProfiles || {}) };
-    if (!profiles[name]) return { ok: false, error: 'Profile not found' };
-    delete profiles[name];
-    settings.thirdPartyProfiles = profiles;
-    try {
-      saveSettings({ throwOnError: true });
-    } catch (error) {
-      return { ok: false, error: error?.message || 'Could not persist third-party API profile deletion' };
-    }
-    void queueLimitInvalidation({ provider: 'thirdparty', accountName: name }, 'profile-delete', {
-      clear: true,
-      refresh: false
-    });
-    return { ok: true };
-  });
-  ipcMain.handle('thirdparty:renameProfile', async (_event, rawOldName, rawNewName) => {
-    const oldName = String(rawOldName || '').trim();
-    const newName = thirdPartyLimits.thirdPartyProfileName(rawNewName);
-    const profiles = { ...(settings.thirdPartyProfiles || {}) };
-    if (!newName || oldName === newName) return { ok: false, errorCode: 'invalidName' };
-    if (!profiles[oldName]) return { ok: false, error: 'Profile not found' };
-    if (profiles[newName]) return { ok: false, error: 'Profile name already exists' };
-    profiles[newName] = profiles[oldName];
-    delete profiles[oldName];
-    settings.thirdPartyProfiles = profiles;
-    try {
-      saveSettings({ throwOnError: true });
-    } catch (error) {
-      return { ok: false, error: error?.message || 'Could not persist third-party API profile rename' };
-    }
-    void queueLimitInvalidation({ provider: 'thirdparty', accountName: oldName }, 'profile-rename', {
-      clear: true,
-      refresh: false
-    });
-    void queueLimitInvalidation({ provider: 'thirdparty', accountName: newName }, 'profile-rename');
-    return { ok: true };
-  });
-  ipcMain.handle('thirdparty:setProfileEnabled', async (_event, rawName, enabled) => {
-    const name = String(rawName || '').trim();
-    const profiles = { ...(settings.thirdPartyProfiles || {}) };
-    if (!profiles[name]) return { ok: false, error: 'Profile not found' };
-    profiles[name] = { ...profiles[name], enabled: Boolean(enabled) };
-    settings.thirdPartyProfiles = profiles;
-    try {
-      saveSettings({ throwOnError: true });
-    } catch (error) {
-      return { ok: false, error: error?.message || 'Could not persist third-party API profile state' };
-    }
-    void queueLimitInvalidation({ provider: 'thirdparty', accountName: name }, 'profile-state', {
-      clear: !enabled,
-      refresh: Boolean(enabled)
-    });
-    return { ok: true };
-  });
+  }
+  ipcMain.handle('thirdparty:getProfiles', (_event, ...args) => thirdpartyAccountService().getProfiles(...args));
+  ipcMain.handle('thirdparty:saveProfile', (_event, ...args) => thirdpartyAccountService().saveProfile(...args));
+  ipcMain.handle('thirdparty:deleteProfile', (_event, ...args) => thirdpartyAccountService().deleteProfile(...args));
+  ipcMain.handle('thirdparty:renameProfile', (_event, ...args) => thirdpartyAccountService().renameProfile(...args));
+  ipcMain.handle('thirdparty:setProfileEnabled', (_event, ...args) => thirdpartyAccountService().setProfileEnabled(...args));
   ipcMain.handle('codex:accounts', () => codexAccountsForRenderer());
   ipcMain.handle('codex:setAccountEnabled', (_event, id, enabled) => setCodexManagedAccountEnabled(id, enabled));
-  ipcMain.handle('codex:addAccount', async (event, request = {}) => {
-    const flowId = String(request?.flowId || '').trim();
-    if (codexLoginController) return { ok: false, error: 'A Codex sign-in is already in progress.', flowId };
-    const controller = new AbortController();
-    codexLoginController = controller;
-    codexLoginFlowId = flowId;
-    codexLoginCanCancel = true;
-    let streamed = '';
-    const sendStatus = (payload) => {
-      if (codexLoginController !== controller) return;
-      if (!event.sender.isDestroyed()) {
-        event.sender.send('codex:loginStatus', {
-          ...payload,
-          flowId
-        });
-      }
-    };
-    try {
-      const result = await addCodexManagedAccount((text) => {
-        streamed = (streamed + String(text || '')).slice(-8000);
-        sendStatus({
-          phase: 'output',
-          text: String(text || ''),
-          loginUrl: codexLoginUrlFromOutput(streamed)
-        });
-      }, {
-        signal: controller.signal,
-        selectWorkspace: ({ email, currentWorkspaceId, workspaces }) => new Promise((resolve) => {
-          const finish = (workspaceId) => {
-            if (codexWorkspaceSelection?.controller === controller) codexWorkspaceSelection = null;
-            controller.signal.removeEventListener('abort', onAbort);
-            resolve(workspaceId);
-          };
-          const onAbort = () => finish('');
-          codexWorkspaceSelection = {
-            controller,
-            flowId,
-            webContentsId: event.sender.id,
-            workspaceIds: new Set(workspaces.map((workspace) => workspace.id)),
-            finish
-          };
-          controller.signal.addEventListener('abort', onAbort, { once: true });
-          sendStatus({
-            phase: 'workspaceSelection',
-            email,
-            currentWorkspaceId,
-            workspaces: workspaces.map(({ id, label, workspaceKind }) => ({ id, label, workspaceKind }))
-          });
-        }),
-        onCommit: () => {
-          if (codexLoginController === controller) codexLoginCanCancel = false;
-        }
-      });
-      if (codexLoginController !== controller) {
-        return { ok: false, error: codexLoginErrorMessage({ outcome: 'cancelled' }), outcome: 'cancelled', flowId };
-      }
-      return { ...result, flowId };
-    } finally {
-      if (codexLoginController === controller) {
-        if (codexWorkspaceSelection?.controller === controller) codexWorkspaceSelection.finish('');
-        codexLoginController = null;
-        codexLoginFlowId = '';
-        codexLoginCanCancel = false;
-      }
+  ipcMain.handle('codex:addAccount', (event, request = {}) => codexAccountService().login(request, {
+    ownerId: event.sender.id,
+    onStatus: payload => {
+      if (!event.sender.isDestroyed()) event.sender.send('codex:loginStatus', payload);
     }
-  });
-  ipcMain.handle('codex:selectWorkspace', (event, request = {}) => {
-    const flowId = String(request?.flowId || '').trim();
-    const workspaceId = normalizeWorkspaceId(request?.workspaceId);
-    const pending = codexWorkspaceSelection;
-    if (!pending || pending.webContentsId !== event.sender.id) return { ok: false, stale: true };
-    if (flowId && pending.flowId && flowId !== pending.flowId) return { ok: false, stale: true };
-    if (!workspaceId || !pending.workspaceIds.has(workspaceId)) {
-      return { ok: false, error: 'Unknown Codex workspace.' };
-    }
-    pending.finish(workspaceId);
-    return { ok: true };
-  });
-  ipcMain.handle('codex:cancelLogin', (_event, request = {}) => {
-    const flowId = String(request?.flowId || '').trim();
-    if (flowId && codexLoginFlowId && flowId !== codexLoginFlowId) return { ok: true, cancelled: false };
-    const controller = codexLoginController;
-    if (!controller) return { ok: true, cancelled: false };
-    if (!codexLoginCanCancel) return { ok: false, cancelled: false, tooLate: true };
-    controller?.abort();
-    return { ok: true, cancelled: true };
-  });
+  }));
+  ipcMain.handle('codex:selectWorkspace', (event, request = {}) => codexAccountService().selectWorkspace(request, event.sender.id));
+  ipcMain.handle('codex:cancelLogin', (_event, request = {}) => codexAccountService().cancelLogin(request));
   ipcMain.handle('codex:removeAccount', async (_event, id) => removeCodexManagedAccount(id));
   ipcMain.handle('codex:switchSystemAccount', async (_event, id) => switchCodexSystemAccount(id));
   ipcMain.handle('codex:refreshAccountLimits', async (_event, id) => refreshCodexManagedAccountLimits(id));
+  const copilotAccounts = createCopilotAccounts({
+    getSettings: () => settings, service: accountSlotService,
+    probeDeps: () => electronProviderDeps({ env: {}, signal: AbortSignal.timeout(15_000) })
+  });
+  ipcMain.handle('copilot:getAccounts', () => copilotAccounts.getAccounts());
+  for (const method of ['addAccount', 'removeAccount', 'setEnabled']) {
+    ipcMain.handle(`copilot:${method}`, async (_event, ...args) => {
+      try { return await copilotAccounts[method](...args); }
+      catch (_) { return { ok: false, error: 'Could not update GitHub Copilot account. Please try again.' }; }
+    });
+  }
   ipcMain.handle('copilot:signIn', async (event, request = {}) => {
     if (copilotLoginController) return { ok: false, error: 'A GitHub Copilot sign-in is already in progress.', flowId: copilotLoginFlowId };
     const controller = new AbortController();
@@ -9743,8 +8485,10 @@ app.whenReady().then(() => {
       if (!event.sender.isDestroyed()) event.sender.send('copilot:loginStatus', { ...payload, flowId });
     };
     try {
+      const enterpriseHost = request.values?.copilotEnterpriseHost ?? request.enterpriseHost
+        ?? (settings?.copilotEnterpriseHost || process.env.COPILOT_ENTERPRISE_HOST || process.env.GITHUB_ENTERPRISE_HOST || '');
       const result = await runCopilotDeviceFlowLogin({
-        enterpriseHost: settings?.copilotEnterpriseHost || process.env.COPILOT_ENTERPRISE_HOST || process.env.GITHUB_ENTERPRISE_HOST || '',
+        enterpriseHost,
         signal: controller.signal,
         onStatus: sendStatus
       }, {
@@ -9755,10 +8499,8 @@ app.whenReady().then(() => {
       if (copilotLoginController !== controller) {
         return { ok: false, error: copilotLoginErrorMessage({ status: 'cancelled' }), flowId };
       }
-      settings.copilotApiToken = normalizeAccountField('copilotApiToken', result.accessToken);
-      saveSettings({ throwOnError: true });
-      pushSettingsToRenderer();
-      void queueLimitInvalidation({ provider: 'copilot' }, 'login', { clear: true });
+      const saved = await copilotAccounts.addAccount(result.accessToken, () => copilotLoginController === controller && !controller.signal.aborted, controller.signal, enterpriseHost, request.label);
+      if (!saved.ok) throw new Error('Could not save GitHub Copilot account.');
       return { ok: true, flowId };
     } catch (error) {
       const message = copilotLoginErrorMessage(error);
@@ -9801,16 +8543,18 @@ app.whenReady().then(() => {
   ipcMain.on('dashboard:ready', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (!win || win !== dashboardWindow || win.isDestroyed()) return;
-    if (win.isMinimized()) win.restore();
-    win.show();
-    win.focus();
+    // A shared renderer can retain an opaque canvas over the native material.
+    // Restore transparency after load, before revealing the prepared Dashboard.
+    if (process.platform === 'darwin') win.setBackgroundColor('#00000000');
+    dashboardWindowReady = true;
+    showDashboardWindow(win);
   });
   ipcMain.on('dashboard:minimize', (event) => { BrowserWindow.fromWebContents(event.sender)?.minimize(); });
   ipcMain.on('dashboard:close', (event) => { BrowserWindow.fromWebContents(event.sender)?.close(); });
   app.on('activate', () => {
     const action = activateWindowAction({
       mainWindow,
-      windows: BrowserWindow.getAllWindows(),
+      windows: BaseWindow.getAllWindows(),
       isDockOwned: (win) => Boolean(edgeDockController?.owns(win) || notchController?.owns(win))
     });
     if (action === 'focusWindow') focusExistingWindow();
@@ -9827,6 +8571,8 @@ app.whenReady().then(() => {
   function startPluginRuntime() {
     try {
       pluginRuntime = createPluginRuntime({
+        fetchImpl: electronLimitsFetch(),
+        onLimitsChanged: pluginQuotaChanged,
         getAppSettings: settingsForRenderer,
         electron: { app, BrowserWindow, utilityProcess: require('electron').utilityProcess, Notification, ipcMain, nativeImage, session, shell, dialog },
         userDataDir: app.getPath('userData'),
@@ -9908,13 +8654,35 @@ app.whenReady().then(() => {
 
 app.on('second-instance', focusExistingWindow);
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+// Every window shares one renderer, so a crash blanks them all. Main is the
+// source of truth and republishes settings and stats on load, so reload each
+// crashed page rather than leaving the widget dead. A page that crashes again
+// within the cooldown is left alone: reloading a deterministic failure would
+// only loop.
+const rendererCrashReloadAt = new Map();
+app.on('render-process-gone', (_event, contents, details) => {
+  if (quitRequested || details.reason === 'clean-exit') return;
+  if (!contents || contents.isDestroyed()) return;
+  const reloadAt = rendererCrashReloadAt.get(contents.id) || 0;
+  if (Date.now() - reloadAt < 30_000) return;
+  rendererCrashReloadAt.set(contents.id, Date.now());
+  // Let the crashed host finish tearing down before recreating the page.
+  setTimeout(() => {
+    if (contents.isDestroyed()) return;
+    try { contents.reload(); } catch (_) {}
+  }, 250);
+});
 // Every quit route (Cmd+Q, last window closed, system shutdown) lands here.
-// performQuit is synchronous through to the exit, so there is nothing to wait
-// for and deliberately no preventDefault: taking the quit over would cancel an
-// OS-initiated logout or restart on macOS.
+// Drain queued quota-history writes with a bounded synchronous worker barrier,
+// then keep performQuit synchronous through to the exit. No preventDefault:
+// taking the quit over would cancel an OS-initiated logout or restart on macOS.
 app.on('before-quit', () => {
   quitRequested = true;
-  antigravityOAuthLoginController?.abort();
+  limitsHistoryController?.dispose();
+  limitsHistoryStore?.closeSync();
+  // An updater can abort this quit; subsequent reads need an open store.
+  limitsHistoryStore = null;
+  cancelAntigravityManagedAccountLogin();
   workbuddyManagedAccountService?.cancelLogin();
   resetMacWidgetReloadThrottle();
   if (rateRefreshTimer) clearInterval(rateRefreshTimer);

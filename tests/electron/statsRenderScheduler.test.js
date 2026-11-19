@@ -97,7 +97,7 @@ test('a hidden floating-bubble state update changes state without touching DOM',
         }
       },
       isRendererWindowHidden: () => true,
-      syncPluginTrayDemand() {},
+      syncPluginTrayDemand() {}, syncPluginLimitsDemand() {},
       state,
       statsRenderScheduler: { request() { scheduledRenders += 1; } }
     }
@@ -160,7 +160,7 @@ test('renderer wires visibility scheduling without deferring tray icon updates',
   assert.match(app, /document\.addEventListener\('visibilitychange', handleWindowVisibilityChange\)/);
   assert.match(visibilityListener, /cancelTokenRateBoost\(\)/);
   assert.match(visibilityListener, /!isRendererWindowHidden\(\)[\s\S]*hubBuildStatusRefreshDue\(\)[\s\S]*refreshHubBuildStatus\(\)/);
-  assert.match(visibilityListener, /const settingsVisible = isSettingsSurfaceVisible\(\);[\s\S]*if \(settingsVisible \|\| settingsDomSyncPending\) syncSettingsForm\(\);[\s\S]*statsRenderScheduler\.flush\(\)/);
+  assert.match(visibilityListener, /const settingsVisible = isSettingsSurfaceVisible\(\);[\s\S]*if \(settingsDomSyncPending \|\| \(settingsVisible && !isNativeWindowTransfer\(\)\)\) syncSettingsForm\(\);[\s\S]*statsRenderScheduler\.flush\(\)/);
   assert.doesNotMatch(visibilityListener, /statsRenderScheduler\.clear\(\)/);
   assert.match(app, /isHidden: isRendererWindowHidden/);
   assert.match(app, /onWindowVisibilityPush\?\.\(\(visible\) => \{/);
@@ -198,7 +198,7 @@ test('native visibility is resynced after every renderer load without blocking t
   // The listener must also survive Cmd+Shift+R: tray-mode URLs retain
   // windowHidden=1, so a visible reloaded renderer needs the native truth again.
   assert.match(visibilityHooks, /win\.webContents\.on\('did-finish-load'/);
-  assert.match(visibilityHooks, /if \(win\.isVisible\(\)\) sendMainWindowVisibility\(win\);/);
+  assert.match(visibilityHooks, /if \(mainWindow\?\.isVisible\(\)\) sendMainWindowVisibility\(mainWindow\);/);
   assert.doesNotMatch(visibilityHooks, /^\s*sendMainWindowVisibility\(win\);/m);
 });
 
@@ -210,7 +210,7 @@ test('a window revealed straight into Settings still reports painted content', (
   );
   // Settings is an overlay, so revealing into it must flush the pending main
   // repaint as well as syncing the visible form and reporting painted content.
-  assert.match(visibilityHandler, /if \(settingsVisible \|\| settingsDomSyncPending\) syncSettingsForm\(\);/);
+  assert.match(visibilityHandler, /if \(settingsDomSyncPending \|\| \(settingsVisible && !isNativeWindowTransfer\(\)\)\) syncSettingsForm\(\);/);
   assert.match(visibilityHandler, /statsRenderScheduler\.flush\(\);/);
   assert.match(visibilityHandler, /if \(settingsVisible\) \{[\s\S]*signalContentReady\(\);/);
   assert.doesNotMatch(visibilityHandler, /statsRenderScheduler\.clear\(\)/);
@@ -247,7 +247,7 @@ test('leaving Settings no longer needs a catch-up repaint', () => {
   // The main surface keeps rendering behind the overlay, so neither exit path
   // may repaint merely because Settings happened to be open.
   assert.doesNotMatch(settingsToggle, /render\(\)/);
-  assert.match(settingsToggle, /if \(settingsOpen\) \{\s+syncSettingsForm\(\);\s+\} else \{/);
+  assert.match(settingsToggle, /if \(settingsOpen\) \{\s+hideHomeTrendTooltip\(\);\s+syncSettingsForm\(\);\s+\} else \{/);
   assert.doesNotMatch(trayView, /settingsWasOpen/);
   // Tray navigation to the view already on screen still repaints, because it
   // clears the open session and nothing else redraws that.
@@ -257,7 +257,7 @@ test('leaving Settings no longer needs a catch-up repaint', () => {
 test('stats-derived Settings rows refresh behind an open panel', () => {
   const app = fs.readFileSync(path.join(rendererDir, 'app.js'), 'utf8');
   const renderBody = app.slice(
-    app.indexOf('function renderAppContent() {'),
+    app.indexOf('function renderAppContent('),
     app.indexOf('\nfunction setStatus(')
   );
   const archiveBody = app.slice(
@@ -269,14 +269,14 @@ test('stats-derived Settings rows refresh behind an open panel', () => {
     app.indexOf('function isSettingsSurfaceVisible()')
   );
 
-  // The archived session count is Settings content derived from state.stats, and
-  // the only thing that redraws it is the main render. It goes stale for as long
-  // as anything stops render() from running while the panel is open, which is how
-  // it used to need a close and reopen to catch up.
-  assert.match(archiveBody, /sessionRowsApi\.archivedSessionCount\(state\.stats\)/);
+  // The archived session count is Settings content counted for the snapshot in
+  // state.stats, and the only thing that asks for it is the main render. It goes
+  // stale for as long as anything stops render() from running while the panel is
+  // open, which is how it used to need a close and reopen to catch up.
+  assert.match(archiveBody, /requestArchivedSessionCount\(\);/);
   assert.doesNotMatch(archiveBody, /isSettingsSurfaceVisible|isSettingsPanelOpen/);
   assert.match(renderBody, /renderSessionUsageArchiveStatus\(\);/);
-  assert.match(app, /function render\(\) \{\n {2}renderAppContent\(\);/);
+  assert.match(app, /function render\(\{ fromSearch = false \} = \{\}\) \{\n {2}renderAppContent\(\{ fromSearch \}\);/);
   assert.doesNotMatch(renderBody, /isSettingsSurfaceVisible|isSettingsPanelOpen/);
   assert.doesNotMatch(surfaceBody, /isSettingsPanelOpen/);
 });
@@ -287,15 +287,15 @@ test('a stats update repaints main and the visible Settings overlay', () => {
     'renderCodexAccounts',
     'renderMimoStatus',
     'renderWorkbuddyStatus',
+    'refreshAccountOwnerReadings',
     'renderSettingsSummaries',
     'renderLimitProviderCheckboxes',
     'renderToolPreferences',
     'renderWslPanel',
-    'updateOpenRouterProfilesStatus',
+    'updateOpenRouterProfilesStatus', 'updateMinimaxApiKeysStatus',
     'updateThirdPartyProfilesStatus',
     'renderDeepseekStatus',
-    'renderMinimaxStatus',
-    'renderCopilotStatus'
+    'renderMinimaxStatus'
   ];
   const context = {
     visibleStatsSurface: () => 'main',
@@ -304,6 +304,7 @@ test('a stats update repaints main and the visible Settings overlay', () => {
     state: { settings: { limitAccountForms: [{ id: 'typesafe' }] } },
     limitProviderAccountGroup: () => true,
     isSettingsSurfaceVisible: () => true,
+    preserveSettingsPanelScroll(callback) { calls.push('settings-scroll-batch'); return callback(); },
     renderFloatingBubbleContent: () => calls.push('bubble'),
     signalContentReady: () => calls.push('ready')
   };
@@ -318,8 +319,10 @@ test('a stats update repaints main and the visible Settings overlay', () => {
   renderStatsUpdate();
 
   assert.deepEqual(calls.slice(0, 2), ['connection:main', 'main']);
+  assert.equal(calls.filter(call => call === 'settings-scroll-batch').length, 1);
   assert.ok(calls.indexOf('renderSettingsSummaries') > calls.indexOf('main'));
-  assert.ok(calls.indexOf('renderMimoStatus') > calls.indexOf('main'));
+  // A list that repaints only on settings pushes keeps its pre-refresh status.
+  assert.ok(calls.indexOf('refreshAccountOwnerReadings') > calls.indexOf('main'));
   assert.equal(calls.at(-1), 'ready');
 });
 
@@ -343,7 +346,14 @@ test('the closed-Settings guard does not strand main-surface controls', () => {
 
 test('heavy render roots reject work for an inactive surface', () => {
   const app = fs.readFileSync(path.join(rendererDir, 'app.js'), 'utf8');
-  const body = (name, next) => app.slice(app.indexOf(`function ${name}(`), app.indexOf(next));
+  const owners = { renderCodexAccounts: 'codex', renderMimoStatus: 'mimo', renderOpenCodeProfiles: 'opencode', renderNamedApiProfiles: 'thirdparty', renderCursorStatus: 'cursor' };
+  const body = (name, next) => {
+    const source = owners[name] ? fs.readFileSync(path.join(rendererDir, `limits/providerOwners/${owners[name]}.js`), 'utf8') : app;
+    const start = source.indexOf(`function ${name}(`);
+    const end = source.indexOf(next, start);
+    assert.ok(start >= 0, name);
+    return source.slice(start, end < 0 ? undefined : end);
+  };
 
   assert.match(body('renderServiceStatus', '\nasync function refreshServiceStatus('), /function renderServiceStatus\(\) \{\n {2}if \(!serviceStatusSurfaceVisible\(\)\) return;/);
   assert.match(body('renderFloatingBubbleContent', '\nfunction setupFloatingBubbleInteraction('), /function renderFloatingBubbleContent\(\) \{\n {2}if \(visibleStatsSurface\(\) !== 'bubble'\) return;/);
@@ -361,8 +371,32 @@ test('heavy render roots reject work for an inactive surface', () => {
     assert.match(body(name, next), new RegExp(`function ${name}\\([^)]*\\) \\{\\n {2}if \\(!isSettingsSurfaceVisible\\(\\)\\) return;`));
   }
 
-  assert.match(body('renderOpenCodeProfiles', '\nfunction normalizeProfileName('), /\.then\(\([^)]*\) => \{\n {4}if \(!isCurrent\(\) \|\| !isSettingsSurfaceVisible\(\)/);
-  assert.match(body('renderNamedApiProfiles', '\nfunction renderOpenRouterProfiles('), /\.then\(\([^)]*\) => \{\n {4}if \(!isCurrent\(\) \|\| !isSettingsSurfaceVisible\(\)/);
+  assert.match(body('renderOpenCodeProfiles', '\nfunction normalizeProfileName('), /getProfiles\(\)\.then\((?:\(\{[^}]*\}\)|result) => \{\s*(?:const \{[^}]*\} = result;\s*)*if \(!isCurrent\(\) \|\| !isSettingsSurfaceVisible\(\)/);
+  assert.match(body('renderNamedApiProfiles', '\nfunction renderOpenRouterProfiles('), /getProfiles\(\)\.then\((?:\(\{[^}]*\}\)|result) => \{\s*(?:const \{[^}]*\} = result;\s*)*if \(!isCurrent\(\) \|\| !isSettingsSurfaceVisible\(\)/);
+});
+
+test('settings summary updates keep identical text nodes during a stats render', () => {
+  let text = 'AI Tool Limits';
+  let summary = text;
+  let writes = 0;
+  const summaryElement = {
+    get textContent() { return text; },
+    set textContent(next) { text = next; writes++; }
+  };
+  const renderSettingsSummaries = rendererFunction('renderSettingsSummaries', '\nfunction formatNumber(', {
+    isSettingsSurfaceVisible: () => true,
+    SETTINGS_SECTION_IDS: ['limits'],
+    els: { limitsSettingsSummary: summaryElement },
+    settingsSectionSummary: () => summary
+  });
+  renderSettingsSummaries();
+  assert.equal(writes, 0);
+
+  summary = '2 enabled';
+  renderSettingsSummaries();
+  renderSettingsSummaries();
+  assert.equal(text, '2 enabled');
+  assert.equal(writes, 1);
 });
 
 test('entering Status does not depend on the panel class from the previous render', () => {
@@ -439,7 +473,7 @@ test('a direct main render defers only while the window is hidden', () => {
   assert.equal(scheduled, 1);
 });
 
-test('hidden event sources defer DOM work and visible surfaces catch up', () => {
+test('hidden event sources prepare appearance, defer other DOM work and catch up when visible', () => {
   const app = fs.readFileSync(path.join(rendererDir, 'app.js'), 'utf8');
   const settingsPush = app.match(/window\.tokenMonitor\.onSettingsPush\?\.\(\(next\) => \{[\s\S]*?\n\}\);/)?.[0] || '';
   const hubPush = app.match(/window\.tokenMonitor\.onHubPush\?\.\(\(payload\) => \{[\s\S]*?\n\}\);/)?.[0] || '';
@@ -457,18 +491,22 @@ test('hidden event sources defer DOM work and visible surfaces catch up', () => 
   assert.doesNotMatch(statsPush, /\b(?:setLiveDot|setStatus|renderSyncPanel)\(/);
   assert.match(statsPush, /if \(isRendererWindowHidden\(\)\) statsRenderScheduler\.request\(\);[\s\S]*else renderConnectionStatus\(\);/);
   assert.match(statsRender, /renderConnectionStatus\(surface\)/);
-  assert.match(bubbleState, /if \(isSettingsPanelOpen\(\)\) syncSettingsForm\(\);[\s\S]*renderStatsUpdate\(\)/);
+  assert.match(bubbleState, /if \(isSettingsPanelOpen\(\) && !isNativeWindowTransfer\(\)\) syncSettingsForm\(\);[\s\S]*renderStatsUpdate\(\)/);
   assert.doesNotMatch(bubbleState, /renderConnectionStatus\('settings'\)/);
   assert.ok(hiddenGuard < settingsSync.indexOf('applyInitialBreakdownPreference()'));
   assert.ok(settingsSync.indexOf('applyInitialBreakdownPreference()') < hiddenReturn);
   assert.ok(hiddenGuard < settingsSync.indexOf('applyVendorColorOverrides('));
   assert.ok(settingsSync.indexOf('applyVendorColorOverrides(') < hiddenReturn);
-  for (const domCall of ['applySettingsTranslations()', 'syncPeriodTabs()', 'applyAppearanceSettings(']) {
+  // Native show can paint before visibility IPC; appearance is the exception
+  // to hidden DOM deferral, including saved title mode and font preferences.
+  assert.ok(hiddenGuard < settingsSync.indexOf('applyAppearanceSettings('));
+  assert.ok(settingsSync.indexOf('applyAppearanceSettings(') < hiddenReturn);
+  for (const domCall of ['applySettingsTranslations()', 'syncPeriodTabs()']) {
     assert.ok(hiddenReturn < settingsSync.indexOf(domCall));
   }
   assert.match(settingsSync, /if \(isRendererWindowHidden\(\)\) \{[\s\S]*settingsDomSyncPending = true;[\s\S]*return;/);
   assert.match(visibilityHandler, /else applyFloatingBubbleState\(state\.floatingBubble, \{ renderContent: false \}\);/);
-  assert.match(visibilityHandler, /if \(settingsVisible \|\| settingsDomSyncPending\) syncSettingsForm\(\);[\s\S]*statsRenderScheduler\.flush\(\);/);
+  assert.match(visibilityHandler, /if \(settingsDomSyncPending \|\| \(settingsVisible && !isNativeWindowTransfer\(\)\)\) syncSettingsForm\(\);[\s\S]*statsRenderScheduler\.flush\(\);/);
 });
 
 test('all stats refreshes use visibility-aware rendering', () => {
@@ -484,5 +522,5 @@ test('all stats refreshes use visibility-aware rendering', () => {
 
   assert.match(refreshStats, /getStats\(options\)[\s\S]*statsRenderScheduler\.request\(\);/);
   assert.equal([...refreshStats.matchAll(/setStatus\(statusTextFor/g)].length, 1);
-  assert.match(statsRender, /renderMimoStatus\(\);/);
+  assert.match(statsRender, /refreshAccountOwnerReadings\(\);/);
 });

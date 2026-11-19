@@ -11,6 +11,14 @@ function read(name) {
   return fs.readFileSync(path.join(rendererDir, name), 'utf8');
 }
 
+test('Alibaba plan variants get different Notch and Dock quota keys', () => {
+  const { providerKey } = require('../../src/electron/renderer/limits/resetMotion');
+  const team = { provider: 'alibaba', accountKey: 'same-uid', region: 'cn' };
+  const personal = { ...team, region: 'cn-personal' };
+  assert.notEqual(providerKey(team), providerKey(personal));
+  assert.equal([team, personal].find(row => providerKey(row) === providerKey(personal)), personal);
+});
+
 test('period tabs use one sliding selection indicator', () => {
   const html = read('index.html');
   const css = read('styles.css');
@@ -89,7 +97,7 @@ test('live row updates count and resize bars together without slowing the headli
   const app = read('app.js');
   const renderRows = app.slice(app.indexOf('function renderRows('), app.indexOf('function deviceLabel('));
 
-  assert.match(renderRows, /const rowsChanged =[\s\S]*?const liveMotionSnapshot = rowsChanged && !state\.periodMotionActive && !state\.animateBarsFromZero[\s\S]*?captureBreakdownMotion\(\)/);
+  assert.match(renderRows, /const rowsChanged =[\s\S]*?const liveMotionSnapshot = rowsChanged && !fromSearch && !state\.periodMotionActive && !state\.animateBarsFromZero[\s\S]*?captureBreakdownMotion\(\)/);
   assert.ok(renderRows.indexOf('captureBreakdownMotion()') < renderRows.indexOf('if (structureChanged)'));
   assert.match(app, /if \(liveMotionSnapshot\) animateBreakdownFrom\(liveMotionSnapshot, \{ duration: 600 \}\)/);
   assert.match(app, /const animationFrom = numberAnimHandle \? numberAnimValue : state\.currentTotal/);
@@ -193,6 +201,6 @@ test('Home history visuals reveal left to right only when entering the view', ()
   assert.match(app, /new ResizeObserver\(applySettledLayout\)/);
   assert.match(
     app,
-    /setupHomeActivityScroller\(activityScroll,\s*\(\)\s*=>\s*\{[\s\S]*?animateHomeHistoryVisuals\(activityScroll, activityCanvas, chart\)[\s\S]*?\}\)/
+    /setupHomeActivityScroller\(scroller, reveal\)/
   );
 });
