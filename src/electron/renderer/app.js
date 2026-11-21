@@ -350,6 +350,10 @@ state.codexResetForecast = null;
 state.codexResetForecastBusy = false;
 state.codexResetForecastRequestedAt = 0;
 state.codexResetForecastRetryTimer = null;
+state.untrackedWithData = [];
+state.untrackedWithDataProbed = null;
+state.untrackedWithDataPathsKey = '';
+state.untrackedWithDataRequest = 0;
 state.clientRescans = clientRescanStateApi.createClientRescanState({
   onChange: (clientId) => {
     if (state.clientHealthExpanded === clientId || (state.clientHealthExpanded === 'qoder' && qoderDisplayApi.isQoder(clientId))) refillOpenClientHealthPanel();
@@ -850,6 +854,7 @@ function setSettingsSectionExpanded(section, expanded) {
   if (id === 'sync' && next) void syncContentForm?.refresh();
   if (id === 'general' && next) void refreshAboutStars();
   if (id === 'plugins' && next) void pluginSettingsPanel?.refresh().then(renderSettingsSummaries);
+  if (id === 'tools' && next) loadUntrackedClientsWithData();
 }
 
 // Expanding a section auto-collapses the previously open one. When that one
@@ -6467,6 +6472,7 @@ function openSettingsPanel(section) {
   els.shell.classList.add('settings-open');
   syncPluginLimitsDemand();
   resetMainViewSettings();
+  state.untrackedWithDataProbed = null;
   syncSettingsForm();
   ensureServiceStatusTicker();
   // General stays expanded across closes, so its expand hook alone would leave
@@ -6490,6 +6496,7 @@ function openViewFromTray(viewId) {
   appearanceColorPicker.close();
   els.settingsPanel?.classList.add('hidden');
   els.shell.classList.remove('settings-open');
+  state.untrackedWithDataProbed = null;
   syncPluginLimitsDemand();
   state.openSession = null;
   // Navigating to the view already on screen changes no breakdown, so it never
@@ -8690,10 +8697,14 @@ function applyControlLayout(swapSettingsAndRefresh) {
   }
 }
 
+function resolveMainWindowFonts(settings) {
+  return fontSettingsApi.resolveEffectiveFontSettings(settings, state.settings?.fontContext);
+}
+
 function applyFontSettings(settings) {
   const source = { ...(state.settings || {}), ...(settings || {}) };
   const root = document.documentElement.style;
-  const { interfaceFont, displayFont } = fontSettingsApi.resolveEffectiveFontSettings(source);
+  const { interfaceFont, displayFont } = resolveMainWindowFonts(source);
   document.documentElement.dataset.textSize = fontSettingsApi.normalizeTextSize(source.textSize);
   root.setProperty('--ui-text-scale', String(fontSettingsApi.textScaleForSize(source.textSize)));
   root.setProperty('--ui-font', interfaceFont);
@@ -9583,7 +9594,7 @@ function fontFamilyFromControls(role) {
 }
 
 function fontPreviewForControls(role) {
-  const resolved = fontSettingsApi.resolveEffectiveFontSettings({
+  const resolved = resolveMainWindowFonts({
     interfaceFontFamily: fontFamilyFromControls('interface'),
     displayFontFamily: fontFamilyFromControls('display')
   });
@@ -11091,26 +11102,29 @@ function renderMainViewInspector(view, { off, lastVisible, unavailable }) {
   title.id = 'mainViewInspectorTitle';
   title.textContent = viewLabel(view);
   heading.append(title);
-  if (off) {
-    const subtitle = document.createElement('span');
-    subtitle.className = 'main-view-subtitle';
-    subtitle.textContent = t('settings.views.hiddenGroup');
-    heading.append(subtitle);
-  }
-  header.append(badge, heading);
-  const visibility = document.createElement('label');
-  visibility.className = 'checkbox-label main-view-visibility';
-  const visibilityText = document.createElement('span');
-  visibilityText.className = 'settings-item-title';
-  visibilityText.textContent = t('settings.views.showInSwitcher');
+  // The switch sits in the header: it acts on the whole view, and the
+  // subtitle carries its state or, when it is locked, the reason.
+  const status = unavailable ? t('settings.views.limitsUnavailable')
+    : lastVisible ? t('settings.views.lastVisible')
+      : off ? t('settings.views.hiddenGroup') : '';
   const visibilityInput = document.createElement('input');
   visibilityInput.type = 'checkbox';
+  visibilityInput.className = 'settings-switch';
+  visibilityInput.setAttribute('aria-label', t('settings.views.showInSwitcher'));
   visibilityInput.checked = !off;
   visibilityInput.disabled = lastVisible || unavailable;
   visibilityInput.addEventListener('change', () => void onMainViewVisibilityToggle(view.id));
-  visibility.append(visibilityText, visibilityInput);
+  if (status) {
+    const subtitle = document.createElement('span');
+    subtitle.id = 'mainViewInspectorStatus';
+    subtitle.className = 'main-view-subtitle';
+    subtitle.textContent = status;
+    heading.append(subtitle);
+    visibilityInput.setAttribute('aria-describedby', subtitle.id);
+  }
+  header.append(badge, heading, visibilityInput);
   inspector.setAttribute('aria-labelledby', title.id);
-  inspector.replaceChildren(header, visibility);
+  inspector.replaceChildren(header);
   const settings = MAIN_VIEW_SETTINGS[view.id];
   if (settings) inspector.append(settings());
 }
@@ -11424,94 +11438,46 @@ function renderHomeSettingsList() {
   return wrap;
 }
 
+// Activity's options follow the other Home modules: a nested list of
+// title-left/control-right rows, with a select like Limits' display mode so
+// the narrow inspector column never wraps the choices.
 function renderHomeActivitySettings() {
-  const frag = document.createDocumentFragment();
-
-  const heatmapRow = document.createElement('div');
-  heatmapRow.className = 'home-activity-settings';
-  const heatmapLabel = document.createElement('span');
-  heatmapLabel.textContent = t('settings.home.heatmapColor');
-  const heatmapOptions = document.createElement('div');
-  heatmapOptions.className = 'inline-options';
-  heatmapOptions.setAttribute('role', 'radiogroup');
-  heatmapOptions.setAttribute('aria-label', heatmapLabel.textContent);
-  const currentMetric = state.settings?.heatmapMetric || 'cost';
-  for (const metric of ['tokens', 'cost']) {
-    const option = document.createElement('label');
-    option.className = 'inline-option';
-    const input = document.createElement('input');
-    input.type = 'radio';
-    input.name = 'homeHeatmapMetric';
-    input.value = metric;
-    input.checked = currentMetric === metric;
-    input.addEventListener('change', () => {
-      if (input.checked) void saveSettings({ heatmapMetric: metric }).then(renderHomeIfVisible);
-    });
+  const wrap = document.createElement('div');
+  wrap.className = 'settings-nested-list';
+  const row = (titleKey, options, value, onChange) => {
+    const label = document.createElement('label');
+    label.className = 'settings-item';
     const text = document.createElement('span');
-    text.textContent = t(metric === 'tokens' ? 'dashboard.heatmap.tokens' : 'dashboard.heatmap.cost');
-    option.append(input, text);
-    heatmapOptions.append(option);
-  }
-  heatmapRow.append(heatmapLabel, heatmapOptions);
-  frag.append(heatmapRow);
-
-  const daysRow = document.createElement('div');
-  daysRow.className = 'home-activity-settings';
-  const daysLabel = document.createElement('span');
-  daysLabel.textContent = t('settings.home.activeDaysWindow');
-  const daysOptions = document.createElement('div');
-  daysOptions.className = 'inline-options';
-  daysOptions.setAttribute('role', 'radiogroup');
-  daysOptions.setAttribute('aria-label', daysLabel.textContent);
-  const currentDaysWindow = state.settings?.homeActiveDaysWindow || 'all';
-  for (const mode of ['all', 'year']) {
-    const option = document.createElement('label');
-    option.className = 'inline-option';
-    const input = document.createElement('input');
-    input.type = 'radio';
-    input.name = 'homeActiveDaysWindow';
-    input.value = mode;
-    input.checked = currentDaysWindow === mode;
-    input.addEventListener('change', () => {
-      if (input.checked) void saveSettings({ homeActiveDaysWindow: mode }).then(renderHomeIfVisible);
-    });
-    const text = document.createElement('span');
-    text.textContent = t(`settings.home.activeDaysWindow.${mode}`);
-    option.append(input, text);
-    daysOptions.append(option);
-  }
-  daysRow.append(daysLabel, daysOptions);
-  frag.append(daysRow);
-
-  const trendTokensRow = document.createElement('div');
-  trendTokensRow.className = 'home-activity-settings';
-  const trendTokensLabel = document.createElement('span');
-  trendTokensLabel.textContent = t('settings.home.trendTokens');
-  const trendTokensOptions = document.createElement('div');
-  trendTokensOptions.className = 'inline-options';
-  trendTokensOptions.setAttribute('role', 'radiogroup');
-  trendTokensOptions.setAttribute('aria-label', trendTokensLabel.textContent);
-  const showExactTokens = state.settings?.showExactHomeTrendTokens === true;
-  for (const mode of ['compact', 'exact']) {
-    const option = document.createElement('label');
-    option.className = 'inline-option';
-    const input = document.createElement('input');
-    input.type = 'radio';
-    input.name = 'homeTrendTokens';
-    input.value = mode;
-    input.checked = showExactTokens === (mode === 'exact');
-    input.addEventListener('change', () => {
-      if (input.checked) void saveSettings({ showExactHomeTrendTokens: mode === 'exact' }).then(renderHomeIfVisible);
-    });
-    const text = document.createElement('span');
-    text.textContent = t(`settings.home.trendTokens.${mode}`);
-    option.append(input, text);
-    trendTokensOptions.append(option);
-  }
-  trendTokensRow.append(trendTokensLabel, trendTokensOptions);
-  frag.append(trendTokensRow);
-
-  return frag;
+    text.className = 'settings-item-text';
+    const title = document.createElement('span');
+    title.className = 'settings-item-title';
+    title.textContent = t(titleKey);
+    text.append(title);
+    const select = document.createElement('select');
+    for (const [optionValue, optionKey] of options) {
+      const option = document.createElement('option');
+      option.value = optionValue;
+      option.textContent = t(optionKey);
+      select.append(option);
+    }
+    select.value = value;
+    select.addEventListener('change', () => void onChange(select.value).then(renderHomeIfVisible));
+    label.append(text, select);
+    wrap.append(label);
+  };
+  row('settings.home.heatmapColor',
+    [['tokens', 'dashboard.heatmap.tokens'], ['cost', 'dashboard.heatmap.cost']],
+    state.settings?.heatmapMetric || 'cost',
+    (metric) => saveSettings({ heatmapMetric: metric }));
+  row('settings.home.activeDaysWindow',
+    ['all', 'year'].map((mode) => [mode, `settings.home.activeDaysWindow.${mode}`]),
+    state.settings?.homeActiveDaysWindow || 'all',
+    (mode) => saveSettings({ homeActiveDaysWindow: mode }));
+  row('settings.home.trendTokens',
+    ['compact', 'exact'].map((mode) => [mode, `settings.home.trendTokens.${mode}`]),
+    state.settings?.showExactHomeTrendTokens === true ? 'exact' : 'compact',
+    (mode) => saveSettings({ showExactHomeTrendTokens: mode === 'exact' }));
+  return wrap;
 }
 
 function renderLimitsViewSettingsList() {
@@ -11693,10 +11659,7 @@ function renderSessionSettingsList() {
   });
   wrap.append(titleLabel, titleNote);
   // A plain `.settings-item` row, matching the Model ranking control in Main —
-  // the same title-left/control-right shape. It deliberately does NOT reuse
-  // `.home-activity-settings`: that carries its own indent rule for the Home
-  // modules list, and this row already sits inside `.settings-nested-list`,
-  // which draws that rule, so borrowing it painted a second line.
+  // the same title-left/control-right shape.
   const row = document.createElement('div');
   row.className = 'settings-item';
   const label = document.createElement('span');
@@ -11905,6 +11868,38 @@ function clientSourcesPanelIds(clientId) {
 function clientSourcesPanelKey(clientId) {
   const keys = clientSourcesPanelIds(clientId).map(id => clientSourceCacheApi.clientSourceRequestKey(clientSourcesIdentity(id)));
   return keys.every(Boolean) ? (keys.length === 1 ? keys[0] : JSON.stringify(keys)) : '';
+}
+
+function loadUntrackedClientsWithData(localUsage = clientHealthPresentationApi.clientIdsWithUsage([localDevice()])) {
+  if (!state.settings || els.settingsPanel?.classList.contains('hidden') || !state.settingsSections?.tools) return;
+  const enabled = enabledClientSet();
+  const untracked = KNOWN_CLIENTS.map(({ id }) => id).filter((id) => !enabled.has(id));
+  const pathsKey = JSON.stringify([state.settings.customScanPaths || {}, Boolean(state.settings.wslScanEnabled)]);
+  if (!untracked.length) {
+    state.untrackedWithDataPathsKey = pathsKey;
+    state.untrackedWithDataProbed = new Set();
+    state.untrackedWithData = [];
+    return;
+  }
+  if (
+    state.untrackedWithDataPathsKey === pathsKey
+    && state.untrackedWithDataProbed
+    && untracked.every((id) => localUsage.has(id) || state.untrackedWithDataProbed.has(id))
+  ) {
+    return;
+  }
+  const request = ++state.untrackedWithDataRequest;
+  state.untrackedWithDataPathsKey = pathsKey;
+  state.untrackedWithDataProbed = new Set(untracked);
+  void window.tokenMonitor?.untrackedClientsWithData?.().then((clients) => {
+    if (state.untrackedWithDataRequest !== request) return;
+    const next = Array.isArray(clients) ? clients : [];
+    if (next.join(',') === state.untrackedWithData.join(',')) return;
+    state.untrackedWithData = next;
+    renderToolPreferences();
+  }).catch(() => {
+    if (state.untrackedWithDataRequest === request) state.untrackedWithDataProbed = null;
+  });
 }
 
 function loadClientSources(clientId, options = {}) {
@@ -12767,7 +12762,7 @@ function renderSettingsListEmptyState(list) {
   list.append(empty);
 }
 
-function toolPreferenceRenderSignature() {
+function toolPreferenceRenderSignature(untrackedTags) {
   const clientStatus = localClientStatus();
   const health = localClientHealth();
   const device = localDevice();
@@ -12790,6 +12785,7 @@ function toolPreferenceRenderSignature() {
     query: toolPreferenceQuery(),
     deviceId: device?.deviceId || '',
     clientStatus,
+    untrackedTags,
     healthRows: KNOWN_CLIENTS.map(({ id }) => [
       id,
       health?.clients?.[id]?.overall || '',
@@ -12799,7 +12795,22 @@ function toolPreferenceRenderSignature() {
 }
 
 function renderToolPreferencesNow() {
-  const renderSignature = toolPreferenceRenderSignature();
+  const { clients, matched } = toolPreferenceRows();
+  const untrackedClients = clients.filter(({ id }) => !clientRowTracked(id));
+  const localUsage = clientHealthPresentationApi.clientIdsWithUsage([localDevice()]);
+  loadUntrackedClientsWithData(localUsage);
+  const detectedSources = new Set(state.untrackedWithData || []);
+  const untrackedTags = Object.fromEntries(untrackedClients.map(({ id }) => {
+    const members = clientSourcesPanelIds(id);
+    if (members.some(member => localUsage.has(member))) {
+      return [id, { key: 'settings.tools.status.hasData', tone: 'neutral' }];
+    }
+    if (members.some(member => detectedSources.has(member))) {
+      return [id, { key: 'settings.tools.status.detected', tone: 'muted' }];
+    }
+    return [id, null];
+  }));
+  const renderSignature = toolPreferenceRenderSignature(untrackedTags);
   const detailSignature = JSON.stringify([
     localClientHealth(),
     localDevice(),
@@ -12809,7 +12820,6 @@ function renderToolPreferencesNow() {
     state.settings?.clients || ''
   ]);
   const sourceSignature = clientSourcesPanelKey(state.clientHealthExpanded);
-  const { clients, matched } = toolPreferenceRows();
   // Every client keeps a row; a query with no match adds the no-matches note on
   // top of them, so the short-circuit compares against what this query is
   // expected to have produced.
@@ -12851,7 +12861,6 @@ function renderToolPreferencesNow() {
   const motion = takeSettingsListMotion('client', isTracked)
     ? captureSettingsRowMotion(els.clientDisplayList, '.tool-preference-row[data-client]', 'client')
     : null;
-  const untrackedClients = clients.filter(({ id }) => !isTracked(id));
   const groups = renderSettingsListGroups(els.clientDisplayList, {
     id: 'clientDisplayUntrackedGroup',
     enabledCount: clients.length - untrackedClients.length,
@@ -12879,7 +12888,7 @@ function renderToolPreferencesNow() {
     name.className = 'tool-preference-name';
     name.textContent = label;
     labelGroup.append(settingsListIcon(id, label, clientsWithIcon), name);
-    let statusTag = null;
+    let tagInfo = untrackedTags[id] || null;
     if (tracked) {
       // A tracked client with no reported status yet (first collect still running)
       // reads as "waiting for data" rather than a bare blank.
@@ -12891,23 +12900,24 @@ function renderToolPreferencesNow() {
       const needsAttention = id === 'qoder'
         ? qoderDisplayApi.IDS.some(member => enabled.has(member) && health?.clients?.[member]?.overall === 'attention')
         : health?.clients?.[id]?.overall === 'attention';
-      const tagInfo = needsAttention
+      tagInfo = needsAttention
         ? { key: 'settings.tools.status.attention', tone: 'warn' }
         : id === 'qoder'
           ? { key: qoderTracking.mixed ? 'settings.tools.qoder.partial' : 'settings.tools.qoder.all', tone: 'ok' }
           : clientStatusPresentationApi.clientStatusTag(id, clientStatus[id] || 'waiting');
-      if (tagInfo) {
-        statusTag = document.createElement('span');
-        statusTag.className = `tool-status-tag tool-status-tag-${tagInfo.tone}`;
-        // A healthy client is a dot: the group heading already says it is
-        // tracked. Every other state keeps its words.
-        if (tagInfo.tone === 'ok' && tagInfo.key !== 'settings.tools.qoder.partial') {
-          statusTag.classList.add('is-dot');
-          statusTag.setAttribute('role', 'img');
-          statusTag.setAttribute('aria-label', t(tagInfo.key));
-        } else {
-          statusTag.textContent = t(tagInfo.key);
-        }
+    }
+    let statusTag = null;
+    if (tagInfo) {
+      statusTag = document.createElement('span');
+      statusTag.className = `tool-status-tag tool-status-tag-${tagInfo.tone}`;
+      // A healthy client is a dot: the group heading already says it is
+      // tracked. Every other state keeps its words.
+      if (tagInfo.tone === 'ok' && tagInfo.key !== 'settings.tools.qoder.partial') {
+        statusTag.classList.add('is-dot');
+        statusTag.setAttribute('role', 'img');
+        statusTag.setAttribute('aria-label', t(tagInfo.key));
+      } else {
+        statusTag.textContent = t(tagInfo.key);
       }
     }
     const track = document.createElement('label');
@@ -13061,12 +13071,53 @@ function renderLimitProviderCheckboxes() {
   return preserveSettingsPanelScroll(renderLimitProviderCheckboxesNow);
 }
 
+const MAX_LIMIT_READING_DEVICE_ICONS = 3;
+
+function disabledLimitReadingDevices(providers) {
+  const localId = state.settings?.deviceId || '';
+  // Device rows retain both origins even when the aggregate picks one account reading.
+  const devices = state.stats?.devices || [];
+  const aggregate = state.stats?.limits?.providers || [];
+  const localProviders = [
+    ...(localId ? localDeviceLimitsProviders() ?? aggregate.filter(row => row.sourceDeviceId === localId) : []),
+    ...(state.pluginCatalog?.limits?.providers || [])
+  ];
+  const byProvider = limitProviderPresentationApi.providerReadingDeviceIds(
+    localProviders,
+    devices,
+    aggregate,
+    localId
+  );
+  const deviceById = new Map(devices.filter(device => device?.deviceId).map(device => [device.deviceId, device]));
+  const local = localDevice() || { deviceId: localId, deviceKind: 'desktop' };
+  const describe = (id) => {
+    const isLocal = !localId || id === localId || id === '__local__';
+    const device = isLocal ? local : (deviceById.get(id) || { deviceId: id });
+    return {
+      deviceId: isLocal ? (localId || '__local__') : id,
+      local: isLocal,
+      kind: deviceIconsApi.deviceIconKind(state.settings, device),
+      name: isLocal ? t('settings.sync.panel.thisDevice') : deviceBreakdownApi.deviceLabel(device)
+    };
+  };
+  return Object.fromEntries(providers.map(({ id }) => {
+    const list = (byProvider.get(id) || []).map(describe).sort((a, b) => {
+      if (a.local !== b.local) return a.local ? -1 : 1;
+      return a.name.localeCompare(b.name) || a.deviceId.localeCompare(b.deviceId);
+    });
+    return [id, list];
+  }));
+}
+
 function renderLimitProviderCheckboxesNow() {
   renderAccountSlotPanels();
   refreshAccountSlotPanels();
   for (const [id, panel] of automaticAccountPanels) panel.controller.update(strictLocalProviderStatuses(id));
-  const renderSignature = limitProviderSettingsRenderSignature();
   const { providers, matched } = limitProviderRows();
+  const enabled = enabledLimitProviderSet();
+  const disabledProviders = providers.filter(({ id }) => !enabled.has(id));
+  const readingDevicesByProvider = disabledLimitReadingDevices(disabledProviders);
+  const renderSignature = limitProviderSettingsRenderSignature(readingDevicesByProvider);
   // Same reasoning as the tracked-tools list: every provider keeps a row, and no
   // matches leaves the no-matches note on top of them.
   if (
@@ -13093,12 +13144,10 @@ function renderLimitProviderCheckboxesNow() {
       reusableSettingInputs.set(`${providerId}:item:${input.dataset.itemId}`, input);
     }
   }
-  const enabled = enabledLimitProviderSet();
   const filtering = Boolean(limitProviderQuery());
   const motion = takeSettingsListMotion('provider', id => enabled.has(id))
     ? captureSettingsRowMotion(els.limitProviderCheckboxes, '.limit-provider-row[data-provider]', 'provider')
     : null;
-  const disabledProviders = providers.filter(({ id }) => !enabled.has(id));
   const groups = renderSettingsListGroups(els.limitProviderCheckboxes, {
     id: 'limitProviderDisabledGroup',
     enabledCount: providers.length - disabledProviders.length,
@@ -13186,6 +13235,27 @@ function renderLimitProviderCheckboxesNow() {
     row.classList.toggle('has-status-tag', Boolean(actions.querySelector('.limit-provider-tag-status')));
     copy.append(nameLine);
     wrap.append(cb);
+    const readingDevices = !isEnabled ? (readingDevicesByProvider[id] || []) : [];
+    let readingIndicator = null;
+    if (readingDevices.length) {
+      readingIndicator = document.createElement('span');
+      readingIndicator.id = `limitProviderReadingDevices-${id}`;
+      readingIndicator.className = 'limit-provider-reading-devices';
+      for (const device of readingDevices.slice(0, MAX_LIMIT_READING_DEVICE_ICONS)) {
+        readingIndicator.append(deviceIconsApi.deviceIconNode(document, device.kind));
+      }
+      if (readingDevices.length > MAX_LIMIT_READING_DEVICE_ICONS) {
+        const overflow = document.createElement('span');
+        overflow.className = 'limit-provider-reading-overflow';
+        overflow.setAttribute('aria-hidden', 'true');
+        overflow.textContent = `+${readingDevices.length - MAX_LIMIT_READING_DEVICE_ICONS}`;
+        readingIndicator.append(overflow);
+      }
+      limitWindowsView.setDetailTooltip(readingIndicator, [
+        { full: t('settings.limits.readingsFrom'), caption: true },
+        ...readingDevices.map(device => ({ full: device.name }))
+      ], { centered: true });
+    }
     const accountStatus = limitProviderAccountStatus(id);
     if (accountStatus) {
       accountStatus.classList.toggle('hidden', !isEnabled);
@@ -13269,7 +13339,9 @@ function renderLimitProviderCheckboxesNow() {
       main.className = 'limit-provider-main';
     }
     main.append(disclosure, copy, actions);
-    row.append(main, wrap);
+    row.classList.toggle('has-reading-devices', Boolean(readingIndicator));
+    if (readingIndicator) row.append(main, readingIndicator, wrap);
+    else row.append(main, wrap);
     // Reordering is suppressed while a filter is on: the drop commits the order
     // it reads off the list, and a filtered list is only part of it. Disabled
     // providers wait in their own group and have no order to change.
@@ -13630,7 +13702,7 @@ const LIMIT_PROVIDER_SETTINGS = {
   }]
 };
 
-function limitProviderSettingsRenderSignature() {
+function limitProviderSettingsRenderSignature(readingDevices) {
   const settings = state.settings || {};
   const providerSignature = (provider) => {
     return [
@@ -13675,6 +13747,7 @@ function limitProviderSettingsRenderSignature() {
     connectionReadings: [...enabledLimitProviderSet()].sort().map((id) => [id, strictLocalProviderStatuses(id)
       .map((row) => [row.status || '', Boolean(row.stale), row.source || '', row.sourceDetail || ''])]),
     query: limitProviderQuery(),
+    readingDevices,
     providers: (state.stats?.limits?.providers || []).map(providerSignature),
     devices: (state.stats?.devices || []).map(deviceSignature)
   });
@@ -14816,6 +14889,7 @@ els.settingsButton.addEventListener('click', (event) => {
     appearanceColorPicker.close();
     resetSettingsListSearch();
     stopWindowShortcutRecording();
+    state.untrackedWithDataProbed = null;
   }
   els.shell.classList.toggle('settings-open', settingsOpen);
   syncPluginLimitsDemand();
@@ -16077,12 +16151,33 @@ window.tokenMonitor.onStatsPush?.((payload) => {
     return;
   }
   const wasStreamConnected = state.streamConnected;
+  let incomingStats = null;
   if (payload.event === 'status') {
     state.streamConnected = Boolean(payload.data?.connected);
     if (payload.data?.mode) state.mode = payload.data.mode;
     if (payload.data?.icloud) state.icloudStatus = payload.data.icloud;
     state.streamFailure = state.streamConnected ? null : (payload.data?.reason ? { reason: payload.data.reason, detail: payload.data.detail ?? null } : state.streamFailure);
-  } else if (payload.data?.stats) {
+  } else {
+    if (payload.data?.stats) {
+      incomingStats = payload.data.stats;
+      state.statsDeltaResyncPending = null;
+    } else if (payload.data?.statsDelta) {
+      incomingStats = window.TokenMonitorStatsDelta?.applyStatsDelta(state.stats, payload.data.statsDelta) || null;
+      if (!incomingStats) {
+        // Recover on the stats push channel, where a full snapshot arrives
+        // before any delta based on it. The invoke reply carries no stats.
+        if (!state.statsDeltaResyncPending) {
+          const request = window.tokenMonitor.getStats({ deltaResync: true }).catch(() => {});
+          state.statsDeltaResyncPending = request;
+          void request.finally(() => {
+            if (state.statsDeltaResyncPending === request) state.statsDeltaResyncPending = null;
+          });
+        }
+        return;
+      }
+    } else {
+      return;
+    }
     // Local overlays and adopted reads update data independently of the
     // Hub SSE transport. Preserve its current Offline/error state until a
     // real stream status or remote stats event proves the connection changed.
@@ -16093,7 +16188,7 @@ window.tokenMonitor.onStatsPush?.((payload) => {
     if (payload.data?.mode) state.mode = payload.data.mode;
     if (payload.data?.icloud) state.icloudStatus = payload.data.icloud;
     allTimeSessions.invalidate();
-    state.stats = sessionStatsForDisplay(allTimeSessions.attach(payload.data.stats));
+    state.stats = sessionStatsForDisplay(allTimeSessions.attach(incomingStats));
     observeLiveTokenRate(state.stats);
     observeDisplayLiveTokenRates(state.stats);
     applyCodexActiveAccountFromStats();
@@ -16101,8 +16196,6 @@ window.tokenMonitor.onStatsPush?.((payload) => {
     // AGENTS.md collector notes), so only the final push can retire the
     // "just turned trends on" loading state without a flash back to empty.
     if (payload.data?.reason !== 'progress') state.trendsActivating = false;
-  } else {
-    return;
   }
   if (payload.event === 'status') {
     if (isRendererWindowHidden()) statsRenderScheduler.request();
@@ -16112,7 +16205,7 @@ window.tokenMonitor.onStatsPush?.((payload) => {
     void refreshHubBuildStatus();
     void syncContentForm?.refresh();
   }
-  if (payload.data?.stats) {
+  if (incomingStats) {
     if (fixedPeriodRangesApi.isDerived(state.period)) {
       // Keep the currently rendered range stable while a new History revision is
       // fetched; repaint once with the coherent snapshot instead of flashing an
