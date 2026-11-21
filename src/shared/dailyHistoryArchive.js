@@ -700,34 +700,29 @@ function mergeLiveDayMetadata(liveDay, previousDay) {
   };
 }
 
-function captureLiveDailyHistory(existingArchive, period, options = {}) {
-  if (options.timeZone) {
-    return captureCalendar(existingArchive, options, scope => captureLiveDailyHistory(scope, period, { ...options, timeZone: undefined }));
-  }
-  const archive = normalizeDailyHistoryArchive(existingArchive);
+// The live-day half of captureLiveDailyHistory, without the archive read or
+// normalization. A watch tick that may not write only needs the in-memory live
+// maximum; keeping this pure lets that path avoid a synchronous read, parse and
+// two normalizations every few seconds.
+function captureLiveDay(previous, period, options = {}) {
   const date = String(options.todayKey || '').slice(0, 10);
-  if (DAY_KEY_RE.test(date) && archive.liveDays) {
-    for (const liveDate of Object.keys(archive.liveDays)) {
-      if (liveDate > date) delete archive.liveDays[liveDate];
-    }
-  }
   const incoming = periodLiveDay(period, date);
-  if (!incoming) return archive;
+  if (!incoming) return previous || null;
   if (typeof options.pricingRevision === 'string') {
     for (const observation of Object.values(incoming.observations)) {
       observation.pricingRevision = options.pricingRevision;
     }
   }
-  return captureLiveDay(archive, incoming, options);
+  return selectLiveDay(previous, incoming, options.sourceDay, options);
 }
 
-function captureLiveDay(archive, incoming, options = {}) {
-  const date = incoming.date;
-  const previous = archive.liveDays?.[date];
+// Pick the day to store for one date. `sourceDay` is the persisted graph day for
+// that date, when the caller has an archive; the pure live-tick path omits it.
+function selectLiveDay(previous, incoming, sourceDay, options = {}) {
   // Keep complete credit observations before whole-day selection, including
   // absent models: a missing source supplies no zero-price correction.
   // Live prices win ties, while unrelated clients can still grow.
-  for (const retainedDay of [previous, archive.days[date]]) {
+  for (const retainedDay of [previous, sourceDay]) {
     for (const [key, retained] of Object.entries(retainedDay?.observations || {})) {
       const observation = incoming.observations[key];
       if ((!observation && retained.client === 'qodercn')
@@ -762,25 +757,57 @@ function captureLiveDay(archive, incoming, options = {}) {
         selected.componentSummary = previous.componentSummary;
       }
     }
-    archive.liveDays = { ...(archive.liveDays || {}), [date]: selected };
-  } else if (previous) {
-    // A partial scan must not discard the larger retained day. It can still
-    // correct a matching Qoder model without changing any tokens.
-    const observations = { ...previous.observations };
-    let changed = false;
-    for (const [key, observation] of Object.entries(incoming.observations)) {
-      const retained = observations[key];
-      if (observation.client !== 'qodercn' || !retained || observation.tokens !== retained.tokens
-        || isPartialCreditObservation(observation, retained)
-        || (observation.cost === 0 && observation.messages === 0)) continue;
-      observations[key] = {
-        ...retained, cost: observation.cost,
-        messages: Math.max(retained.messages, observation.messages),
-        ...(typeof observation.pricingRevision === 'string' ? { pricingRevision: observation.pricingRevision } : {})
-      };
-      changed = true;
+    return selected;
+  }
+  // A partial scan must not discard the larger retained day. It can still
+  // correct a matching Qoder model without changing any tokens.
+  const observations = { ...previous.observations };
+  let changed = false;
+  for (const [key, observation] of Object.entries(incoming.observations)) {
+    const retained = observations[key];
+    if (observation.client !== 'qodercn' || !retained || observation.tokens !== retained.tokens
+      || isPartialCreditObservation(observation, retained)
+      || (observation.cost === 0 && observation.messages === 0)) continue;
+    observations[key] = {
+      ...retained, cost: observation.cost,
+      messages: Math.max(retained.messages, observation.messages),
+      ...(typeof observation.pricingRevision === 'string' ? { pricingRevision: observation.pricingRevision } : {})
+    };
+    changed = true;
+  }
+  return changed ? { ...previous, observations } : previous;
+}
+
+function captureLiveDays(liveDays, period, options = {}) {
+  const date = String(options.todayKey || '').slice(0, 10);
+  const next = { ...(liveDays || {}) };
+  if (DAY_KEY_RE.test(date)) {
+    for (const liveDate of Object.keys(next)) {
+      if (liveDate > date) delete next[liveDate];
     }
-    if (changed) archive.liveDays[date] = { ...previous, observations };
+  }
+  const selected = captureLiveDay(next[date], period, options);
+  if (selected) next[date] = selected;
+  return next;
+}
+
+function captureLiveDailyHistory(existingArchive, period, options = {}) {
+  if (options.timeZone) {
+    return captureCalendar(existingArchive, options, scope => captureLiveDailyHistory(scope, period, { ...options, timeZone: undefined }));
+  }
+  const archive = normalizeDailyHistoryArchive(existingArchive);
+  const date = String(options.todayKey || '').slice(0, 10);
+  if (DAY_KEY_RE.test(date) && archive.liveDays) {
+    for (const liveDate of Object.keys(archive.liveDays)) {
+      if (liveDate > date) delete archive.liveDays[liveDate];
+    }
+  }
+  const previous = archive.liveDays?.[date];
+  // The retention pass needs the persisted source day for this date, which only
+  // the archive-aware callers have.
+  const selected = captureLiveDay(previous, period, { ...options, sourceDay: archive.days?.[date] });
+  if (selected && selected !== previous) {
+    archive.liveDays = { ...(archive.liveDays || {}), [date]: selected };
   }
   return archive;
 }
@@ -974,8 +1001,9 @@ function clearDailyHistoryArchive(options = {}) {
 function mergeLiveDaysIntoArchive(existingArchive, liveDays) {
   const archive = normalizeDailyHistoryArchive(existingArchive);
   const incoming = normalizeDailyHistoryArchive({ liveDays }).liveDays || {};
-  for (const liveDay of Object.values(incoming)) {
-    captureLiveDay(archive, liveDay);
+  for (const [date, liveDay] of Object.entries(incoming)) {
+    const selected = selectLiveDay(archive.liveDays?.[date], liveDay, archive.days?.[date]);
+    if (selected) archive.liveDays = { ...(archive.liveDays || {}), [date]: selected };
   }
   return archive;
 }
@@ -1011,6 +1039,20 @@ function retainDailyHistory(graphs, options = {}) {
 }
 
 function retainLiveDailyHistory(period, options = {}) {
+  // Watch ticks may update the in-memory live maximum but must not write. Once
+  // the collector holds that maximum, they need not read either: the archive
+  // already holds every older live day and the next writing tick rebases on it.
+  // The first tick still reads so an empty in-memory map is populated exactly
+  // as the writing path would.
+  const knownLiveDays = options.liveDays || {};
+  if (!archiveWriteEnabled(options) && Object.keys(knownLiveDays).length > 0) {
+    const liveDays = captureLiveDays(knownLiveDays, period, options);
+    // Write-disabled callers must read only liveDays from this result; it is
+    // not a complete archive. The next writing tick rebases on the stored one.
+    return options.timeZone
+      ? { calendars: { [options.timeZone]: { liveDays } } }
+      : { liveDays };
+  }
   const previous = readDailyHistoryArchive(options);
   const capture = (archive) => captureLiveDailyHistory(
     options.timeZone ? archive : mergeLiveDaysIntoArchive(archive, options.liveDays),
