@@ -511,6 +511,7 @@ function normalizeLimitProvider(input) {
     provider,
     ...(adapterId ? { adapterId } : {}),
     accountKey,
+    ...(provider === 'qoder' && accountKey && input.accountKeyPortable === true ? { accountKeyPortable: true } : {}),
     ...(relatedAccountKey ? { relatedAccountKey } : {}),
     ...(provider === 'opencode' && input.webAccountKey
       ? { webAccountKey: String(input.webAccountKey) }
@@ -660,7 +661,7 @@ function pickBetterProvider(current, candidate, multiAccount = false) {
   // their exact account, in both aggregation passes.
   if (multiAccount && winner.accountKey !== loser.accountKey) return winner;
   const balanced = carryProviderBalance(winner, loser);
-  return providerPolicies[winner.provider]?.carryObservation?.(balanced, loser) || balanced;
+  return providerPolicies[winner.provider]?.carryObservation?.(balanced, loser, normalizeAccountKeyAliases) || balanced;
 }
 
 function betterProvider(current, candidate) {
@@ -808,6 +809,7 @@ function publicLimits(limits) {
     refreshMs: normalized.refreshMs,
     providers: normalized.providers.map(({
       accountKey,
+      accountKeyPortable,
       relatedAccountKey,
       webAccountKey,
       accountKeyAliases,
