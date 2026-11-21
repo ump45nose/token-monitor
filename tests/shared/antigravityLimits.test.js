@@ -736,3 +736,120 @@ test('fetchAntigravityLimits preserves Gemini 4 Argon from OAuth when local RPC 
   ]);
 });
 
+
+const antigravityOAuthForTests = require('../../src/shared/providers/antigravity/oauth');
+
+function notRunningProbe() {
+  return async () => {
+    const err = new Error('not running');
+    err.status = 'notConfigured';
+    throw err;
+  };
+}
+
+function oauthQuotaFetch() {
+  return async (url) => {
+    if (url.endsWith(':loadCodeAssist')) {
+      return { ok: true, status: 200, json: async () => ({ currentTier: { id: 'standard-tier' } }) };
+    }
+    if (url.endsWith(':retrieveUserQuotaSummary')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          groups: [{
+            displayName: 'Gemini Models',
+            buckets: [{ displayName: 'Weekly Limit', window: 'weekly', remainingFraction: 0.41 }]
+          }]
+        })
+      };
+    }
+    throw new Error(`Unexpected URL ${url}`);
+  };
+}
+
+function managedOAuthAccount(email = 'oauth@example.com') {
+  return {
+    id: 'oauth-account',
+    accountEmail: email,
+    enabled: true,
+    credentials: {
+      accessToken: 'token-oauth',
+      refreshToken: 'refresh-oauth',
+      expiresAt: Date.now() + 3600_000,
+      clientId: 'client',
+      clientSecret: 'secret',
+      projectId: 'project-oauth'
+    }
+  };
+}
+
+test('fetchAntigravityLimits reports the live local account address to the host', async () => {
+  const observed = [];
+  const result = await fetchAntigravityLimits({}, {
+    antigravityProbe: async () => ({
+      accountPlan: 'Google AI Pro',
+      accountEmail: 'local@example.com',
+      windows: [{ name: 'Gemini weekly', kind: 'weekly', remainingFraction: 0.7 }]
+    }),
+    onAntigravityLocalAccountObserved: (identity) => observed.push(identity)
+  });
+  assert.equal(result.accountEmail, 'local@example.com');
+  assert.deepEqual(observed, [{ accountEmail: 'local@example.com' }]);
+});
+
+test('fetchAntigravityLimits keeps the remembered local account selectable while the language server is closed', async () => {
+  const result = await fetchAntigravityLimits({}, {
+    antigravityProbe: notRunningProbe(),
+    resolveAntigravityLocalAccount: () => ({ accountEmail: 'Local@Example.com' })
+  });
+  assert.equal(result.provider, 'antigravity');
+  assert.equal(result.status, 'notConfigured');
+  assert.equal(result.accountEmail, 'local@example.com');
+  assert.equal(result.accountKey, antigravityOAuthForTests.accountKey('local@example.com'));
+  assert.equal(result.source, 'rpc');
+  assert.equal(result.windows.length, 0);
+});
+
+test('fetchAntigravityLimits puts the remembered local account ahead of a different managed OAuth account', async () => {
+  const result = await fetchAntigravityLimits({
+    antigravityManagedAccounts: [managedOAuthAccount('oauth@example.com')]
+  }, {
+    antigravityProbe: notRunningProbe(),
+    resolveAntigravityLocalAccount: () => ({ accountEmail: 'local@example.com' }),
+    fetch: oauthQuotaFetch()
+  });
+  assert.equal(result.length, 2);
+  assert.equal(result[0].accountEmail, 'local@example.com');
+  assert.equal(result[0].source, 'rpc');
+  assert.equal(result[0].status, 'notConfigured');
+  assert.equal(result[1].accountEmail, 'oauth@example.com');
+  assert.equal(result[1].source, 'oauth');
+});
+
+test('fetchAntigravityLimits does not duplicate a remembered local account that is already managed', async () => {
+  const disabled = { ...managedOAuthAccount('local@example.com'), enabled: false };
+  const result = await fetchAntigravityLimits({
+    antigravityManagedAccounts: [managedOAuthAccount('oauth@example.com'), { ...disabled, id: 'other' }]
+  }, {
+    antigravityProbe: notRunningProbe(),
+    resolveAntigravityLocalAccount: () => ({ accountEmail: 'local@example.com' }),
+    fetch: oauthQuotaFetch()
+  });
+  assert.deepEqual(result.map((row) => row.accountEmail), ['oauth@example.com']);
+});
+
+test('fetchAntigravityLimits prefers the live local snapshot over the remembered address', async () => {
+  const result = await fetchAntigravityLimits({
+    antigravityManagedAccounts: [managedOAuthAccount('oauth@example.com')]
+  }, {
+    antigravityProbe: async () => ({
+      accountPlan: 'Google AI Pro',
+      accountEmail: 'new-local@example.com',
+      windows: [{ name: 'Gemini weekly', kind: 'weekly', remainingFraction: 0.7 }]
+    }),
+    resolveAntigravityLocalAccount: () => ({ accountEmail: 'old-local@example.com' }),
+    fetch: oauthQuotaFetch()
+  });
+  assert.deepEqual(result.map((row) => row.accountEmail), ['new-local@example.com', 'oauth@example.com']);
+});
