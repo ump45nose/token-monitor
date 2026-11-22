@@ -166,7 +166,7 @@ test('renderer wires visibility scheduling without deferring tray icon updates',
   assert.match(app, /onWindowVisibilityPush\?\.\(\(visible\) => \{/);
   assert.match(
     statsPush,
-    /state\.stats = sessionStatsForDisplay\(allTimeSessions\.attach\(payload\.data\.stats\)\);[\s\S]*statsRenderScheduler\.request\(\);[\s\S]*maybeUpdateBarsIcon\(\);/
+    /state\.stats = sessionStatsForDisplay\(allTimeSessions\.attach\(incomingStats\)\);[\s\S]*statsRenderScheduler\.request\(\);[\s\S]*maybeUpdateBarsIcon\(\);/
   );
 });
 
@@ -247,7 +247,7 @@ test('leaving Settings no longer needs a catch-up repaint', () => {
   // The main surface keeps rendering behind the overlay, so neither exit path
   // may repaint merely because Settings happened to be open.
   assert.doesNotMatch(settingsToggle, /render\(\)/);
-  assert.match(settingsToggle, /if \(settingsOpen\) \{\s+hideHomeTrendTooltip\(\);\s+syncSettingsForm\(\);\s+\} else \{/);
+  assert.match(settingsToggle, /if \(settingsOpen\) \{\s+hideHomeTrendTooltip\(\);\s+resetMainViewSettings\(\);\s+syncSettingsForm\(\);\s+\} else \{/);
   assert.doesNotMatch(trayView, /settingsWasOpen/);
   // Tray navigation to the view already on screen still repaints, because it
   // clears the open session and nothing else redraws that.

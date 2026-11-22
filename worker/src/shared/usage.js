@@ -336,6 +336,7 @@ function normalizeClientName(value) {
   // Tokscale's id for MiniMax Code. The bare vendor name stays a model vendor
   // and limits provider, so only the product spellings map here.
   if (raw === 'mcode' || /^minimax[\s_-]*code$/.test(raw)) return 'mcode';
+  if (/^open[\s_-]*code[\s_-]*review$/.test(raw)) return 'opencodereview';
   if (raw.includes('opencode')) return 'opencode';
   if (raw.includes('openclaw') || raw.includes('clawd') || raw.includes('moltbot') || raw.includes('moldbot')) return 'openclaw';
   const slug = raw.replace(/[^a-z0-9_-]+/g, '-');
@@ -1337,16 +1338,16 @@ function fallbackUsagePeriod(json) {
 // Build the public aggregate and exact internal per-client partitions in one
 // pass. The partitions stay collector-internal; they let a watch tick replace
 // only the client whose files changed without reconstructing model/cache/project
-// attribution from the already-aggregated public period.
-function extractUsageBundleFromTokscale(json) {
+// attribution from the already-aggregated public period. Callers that only keep
+// the public period (month/allTime scans) pass `partitions: false` so they do not
+// allocate a second full set of session rows that is dropped immediately.
+function extractUsageBundleFromTokscale(json, options = {}) {
+  if (options.partitions === false) return { period: extractUsageFromTokscale(json) };
   const rows = [];
   collectUsageRows(json, rows);
   if (rows.length === 0 && json && typeof json === 'object') {
     const period = fallbackUsagePeriod(json);
-    return {
-      period,
-      byClient: { [UNATTRIBUTED_USAGE_CLIENT]: period }
-    };
+    return { period, byClient: { [UNATTRIBUTED_USAGE_CLIENT]: period } };
   }
   const period = emptyPeriod();
   const byClient = Object.create(null);
@@ -1354,8 +1355,8 @@ function extractUsageBundleFromTokscale(json) {
     const client = detectClient(row);
     const partitionKey = client || UNATTRIBUTED_USAGE_CLIENT;
     if (!byClient[partitionKey]) byClient[partitionKey] = emptyPeriod();
-    addUsageRowToPeriod(period, row, client);
     addUsageRowToPeriod(byClient[partitionKey], row, client);
+    addUsageRowToPeriod(period, row, client);
   }
   return { period, byClient };
 }
@@ -1881,7 +1882,7 @@ function aggregateHistory(devices, options = {}) {
 // Adds every numeric field and nested map of `source` into `target` (an
 // emptyPeriod()-shaped object). Shared by device aggregation and the WSL merge so
 // the two never diverge on which period fields exist.
-function addPeriodInto(target, source) {
+function addPeriodInto(target, source, copyNormalizedSessions = false) {
   target.capabilities.tokenComponents = target.capabilities.tokenComponents === true
     && source.capabilities?.tokenComponents === true;
   target.capabilities.throughput = target.capabilities.throughput === true
@@ -1935,7 +1936,24 @@ function addPeriodInto(target, source) {
     }
   }
   for (const [key, project] of Object.entries(source.projects || {})) addProjectInto(target.projects, key, project);
-  for (const session of Object.values(source.sessions)) addSession(target, session);
+  if (copyNormalizedSessions) {
+    // Canonical rows already have the shape of a first contribution. Keep
+    // the normal merge for overlapping keys and time-sensitive activity.
+    for (const [key, session] of Object.entries(source.sessions)) {
+      const existing = target.sessions[key];
+      if (existing) {
+        mergeSession(existing, session);
+      } else if (session.liveActivity) {
+        addSession(target, session);
+      } else {
+        const copy = cloneSessionForMerge(session);
+        if (session.promptCache) copy.promptCache = { ...session.promptCache };
+        target.sessions[key] = copy;
+      }
+    }
+  } else {
+    for (const session of Object.values(source.sessions)) addSession(target, session);
+  }
   return target;
 }
 
@@ -2032,7 +2050,8 @@ function aggregateDevices(devices, staleAfterMs, nowMs = Date.now(), options = {
     // pass here only re-walked every session again.
     for (const periodName of PERIODS) {
       if (isPeriodExpired(normalized, periodName, now)) continue;
-      addPeriodInto(aggregate.periods[periodName], normalized.periods[periodName]);
+      addPeriodInto(aggregate.periods[periodName], normalized.periods[periodName],
+        periodName === 'month' && options.copyNormalizedMonthSessions === true);
     }
   }
   aggregate.limits = aggregateLimits(aggregate.devices, staleAfterMs, now);

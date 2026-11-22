@@ -2421,13 +2421,16 @@ function createLimitProviderToggleHarness({
   saveSettings
 } = {}) {
   const app = readRendererFile('app.js');
-  const providerSelection = functionBody(app, 'desktopLimitProviders', 'refreshPluginLimitCredentialStatuses') + functionBody(app, 'configuredLimitProviderSelection', 'missingLimitProviderStatus');
+  const providerSelection = functionBody(app, 'desktopLimitProviders', 'refreshPluginLimitCredentialStatuses')
+    + functionBody(app, 'configuredLimitProviderSelection', 'missingLimitProviderStatus')
+    + functionBody(app, 'limitViewAvailable', 'effectiveViewDisplayOrderValue');
   const enabledProviderSelection = functionBody(app, 'enabledLimitProviderSet', 'limitProviderEnabled');
   const toggleStart = app.indexOf('async function onLimitProviderToggle()');
   const toggleEnd = app.indexOf('async function onLimitProviderMove(', toggleStart);
   assert.ok(toggleStart >= 0 && toggleEnd > toggleStart);
   const toggle = app.slice(toggleStart, toggleEnd);
   let checkedProviders = [];
+  const refreshed = [];
   const context = {
     DEFAULT_LIMIT_PROVIDER_ORDER: 'codex',
     LIMIT_PROVIDERS: providerIds.map((id) => ({ id })),
@@ -2449,6 +2452,8 @@ function createLimitProviderToggleHarness({
     },
     saveSettings,
     renderLimitProviderCheckboxes() {},
+    renderViewPreferences: () => refreshed.push('views'),
+    renderSettingsSummaries: () => refreshed.push('summaries'),
     clearDisabledLimitProviderPendingChecks() {},
     setBreakdown() {}
   };
@@ -2458,6 +2463,7 @@ function createLimitProviderToggleHarness({
   context.configuredLimitProviderSelection = vm.runInContext('configuredLimitProviderSelection', context);
   return {
     context,
+    refreshed,
     selection: () => Array.from(context.configuredLimitProviderSelection()),
     setChecked: (ids) => { checkedProviders = ids; },
     toggle: () => vm.runInContext('onLimitProviderToggle()', context)
@@ -2490,6 +2496,7 @@ test('provider toggle restores the confirmed selection when persistence and reco
   await assert.rejects(harness.toggle(), /persist failed/);
 
   assert.deepEqual(harness.selection(), ['codex']);
+  assert.deepEqual(harness.refreshed, ['views', 'summaries']);
 });
 
 test('overlapping failures preserve the latest toggle, then fall back to a newer settings push', async () => {
@@ -6153,4 +6160,62 @@ test('the compact picker and tray retain a weekly-only MiMo quota', () => {
   assert.equal(picked?.remaining, 60);
 
   assert.equal(limitWindowLabel('mimo', { kind: 'weekly' }), 'Weekly');
+});
+
+test('providerReadingDeviceIds groups live local, per-device and aggregate reading origins per provider', () => {
+  const byProvider = presentation.providerReadingDeviceIds(
+    [
+      { provider: 'cursor', status: 'ok' },
+      { provider: 'qoder', status: 'ok' },
+      { provider: 'kimi', status: 'ok', stale: true },
+      { provider: 'openrouter', status: 'notConfigured' }
+    ],
+    [
+      {
+        deviceId: 'mac-local',
+        limits: { providers: [{ provider: 'antigravity', status: 'ok' }] }
+      },
+      {
+        deviceId: 'linux-box',
+        limits: {
+          providers: [
+            { provider: 'antigravity', status: 'ok' },
+            { provider: 'qoder', status: 'ok' },
+            { provider: 'kimi', status: 'error' }
+          ]
+        }
+      },
+      {
+        deviceId: 'win-desk',
+        limits: {
+          providers: [
+            { provider: 'qoder', status: 'ok' },
+            { provider: 'kimi', status: 'ok', stale: true }
+          ]
+        }
+      }
+    ],
+    [
+      { provider: 'qoder', status: 'ok', sourceDeviceId: 'linux-box' },
+      { provider: 'qoder', status: 'ok', sourceDeviceId: 'cloud-node' },
+      { provider: 'kimi', status: 'ok', sourceDeviceId: 'win-desk' },
+      { provider: 'openrouter', status: 'ok', stale: true, sourceDeviceId: 'cloud-node' }
+    ],
+    'mac-local'
+  );
+
+  assert.deepEqual(byProvider.get('cursor'), ['mac-local']);
+  assert.deepEqual(byProvider.get('antigravity'), ['linux-box']);
+  assert.deepEqual(byProvider.get('qoder'), ['mac-local', 'linux-box', 'win-desk', 'cloud-node']);
+  assert.equal(byProvider.get('kimi'), undefined);
+  assert.equal(byProvider.get('openrouter'), undefined);
+
+  const localOnly = presentation.providerReadingDeviceIds(
+    [{ provider: 'cursor', status: 'ok' }],
+    [{ deviceId: 'other', limits: { providers: [{ provider: 'antigravity', status: 'ok' }] } }],
+    [],
+    ''
+  );
+  assert.deepEqual(localOnly.get('cursor'), ['__local__']);
+  assert.equal(localOnly.get('antigravity'), undefined);
 });

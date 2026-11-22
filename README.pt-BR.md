@@ -30,7 +30,7 @@
 
 ## O que é o Token Monitor?
 
-Um app de desktop que mostra o uso de tokens ao vivo e os Limites de Ferramentas de IA em 54+ ferramentas de programação com IA — Claude Code, Codex, Cursor, GitHub Copilot, Cherry Studio e muitas outras — com sincronização multidispositivo em tempo real, tendências de uso histórico e detalhamentos por ferramenta, dispositivo, modelo, sessão ou projeto. Ele aparece onde você estiver olhando: a janela principal, o notch do MacBook, a barra de menus ou a bandeja do sistema, a borda da tela, uma bolha flutuante e widgets nativos do macOS.
+Um app de desktop que mostra o uso de tokens ao vivo e os Limites de Ferramentas de IA em 56+ ferramentas de programação com IA — Claude Code, Codex, Cursor, GitHub Copilot, Cherry Studio e muitas outras — com sincronização multidispositivo em tempo real, tendências de uso histórico e detalhamentos por ferramenta, dispositivo, modelo, sessão ou projeto. Ele aparece onde você estiver olhando: a janela principal, o notch do MacBook, a barra de menus ou a bandeja do sistema, a borda da tela, uma bolha flutuante e widgets nativos do macOS.
 
 ## Ferramentas suportadas
 
@@ -79,6 +79,8 @@ Uso de tokens, limites de ferramentas de IA e detalhes de sessão das ferramenta
     <img src=".github/assets/tools-icon/mistral.png" width="40" alt="Mistral Vibe" title="Mistral Vibe" />
     <img src=".github/assets/tools-icon/prime-agent.png" width="40" alt="Prime Agent" title="Prime Agent" />
     <img src=".github/assets/tools-icon/jcode.png" width="40" alt="Jcode" title="Jcode" />
+    <img src=".github/assets/tools-icon/junie.png" width="40" alt="Junie" title="Junie" />
+    <img src=".github/assets/tools-icon/opencodereview.png" width="40" alt="OpenCodeReview" title="OpenCodeReview" />
     <img src=".github/assets/tools-icon/typesafe.png" width="40" alt="TypeSafe" title="TypeSafe" />
     <img src=".github/assets/tools-icon/openrouter.png" width="40" alt="OpenRouter" title="OpenRouter" />
     <img src=".github/assets/tools-icon/volcengine.png" width="40" alt="Volcengine" title="Volcengine" />
@@ -160,7 +162,7 @@ Abra o app para começar a acompanhar o uso local deste dispositivo, sem configu
 
 ### Acompanhamento de uso
 
-- **Rastreamento de tokens ao vivo** — Claude Code, Codex, Cursor, GitHub Copilot, Antigravity, OpenCode e 42+ ferramentas de IA, com a interface atualizando poucos segundos após cada turno (lista completa na tabela acima)
+- **Rastreamento de tokens ao vivo** — Claude Code, Codex, Cursor, GitHub Copilot, Antigravity, OpenCode e 44+ ferramentas de IA, com a interface atualizando poucos segundos após cada turno (lista completa na tabela acima)
 - **Taxa de tokens ao vivo** — uma leitura opcional da velocidade de geração em `tok/s` ou do consumo total em `tok/min`
 - **Detalhes por sessão** — abra uma sessão para ver os tokens por prompt, expansível até a divisão exata de tokens de cada resposta e as ferramentas usadas (lido sob demanda de transcrições ou bancos locais, nunca sincronizado)
 - **Estatísticas de acerto de cache** — clique em qualquer ferramenta ou modelo para expandir um detalhamento completo dos tokens de entrada (acerto no cache vs. fora do cache), tokens de saída e as porcentagens de acerto
@@ -257,6 +259,8 @@ O Token Monitor suporta uso de tokens, verificação de limites da conta e detal
 | <img src=".github/assets/tools-icon/mistral.png" width="28" alt="Mistral" /> | Mistral Vibe | `$VIBE_HOME/logs/session/` (`~/.vibe/logs/session/`); Cookie do Mistral Admin (franquia de API / cota mensal do Vibe e saldo de créditos) | ✅ | ✅ | — |
 | <img src=".github/assets/tools-icon/prime-agent.png" width="28" alt="Prime Agent" /> | Prime Agent | `~/.prime/agent/` (`sessions/`, `session-artifacts/`) | ✅ | — | — |
 | <img src=".github/assets/tools-icon/jcode.png" width="28" alt="Jcode" /> | Jcode | `~/.jcode/sessions/` | ✅ | — | — |
+| <img src=".github/assets/tools-icon/junie.png" width="28" alt="Junie" /> | Junie | `~/.junie/sessions/**/events.jsonl` | ✅ | — | — |
+| <img src=".github/assets/tools-icon/opencodereview.png" width="28" alt="OpenCodeReview" /> | OpenCodeReview | `~/.opencodereview/sessions/**/*.jsonl` | ✅ | — | — |
 | <img src=".github/assets/tools-icon/typesafe.png" width="28" alt="TypeSafe" /> | TypeSafe | Cookie do TypeSafe Console (saldo de cobrança e gasto estimado em tokens via dados de uso) | — | ✅ | — |
 | <img src=".github/assets/tools-icon/openrouter.png" width="28" alt="OpenRouter" /> | OpenRouter | Chave de API do OpenRouter (uso/limite da chave; saldo quando o acesso a créditos é autorizado, documentado para chaves Management) | — | ✅ | — |
 | <img src=".github/assets/tools-icon/volcengine.png" width="28" alt="Volcengine" /> | Volcengine | Chave de API do Ark ou AK/SK da Volcengine (cota do Ark Coding Plan e do Agent Plan via API da Volcengine) | — | ✅ | — |
@@ -264,7 +268,7 @@ O Token Monitor suporta uso de tokens, verificação de limites da conta e detal
 | <img src=".github/assets/tools-icon/trae.png" width="28" alt="Trae CN" /> | Trae CN | Token de acesso do Trae CN (créditos do Trae CN / SOLO via trae.cn) | — | ✅ | — |
 | <img src=".github/assets/tools-icon/alibaba.png" width="28" alt="Alibaba Cloud" /> | Alibaba Cloud | Cookie do console da Alibaba Cloud (cota do Token Plan do Bailian / Model Studio, Team e Personal) | — | ✅ | — |
 | <img src=".github/assets/tools-icon/stepfun.png" width="28" alt="StepFun" /> | StepFun | Oasis-Token do StepFun (cota do Coding Plan / Token Plan) | — | ✅ | — |
-| <img src=".github/assets/tools-icon/notion.png" width="28" alt="Notion AI" /> | Notion AI | Cotas móvel e mensal do Notion AI para Business/Enterprise; cookie token_v2 manual + ID explícito do workspace | — | ✅ | — |
+| <img src=".github/assets/tools-icon/notion.png" width="28" alt="Notion AI" /> | Notion AI | Créditos Standard e Select ou cotas móvel e mensal legadas para Business/Enterprise; cookie token_v2 manual + ID explícito do workspace | — | ✅ | — |
 | <img src=".github/assets/tools-icon/manus.png" width="28" alt="Manus" /> | Manus | Créditos do Manus (mensais + recarga diária/periódica + saldo); sessão desktop (macOS/Windows) ou sessão web manual (todos os SOs) | — | ✅ | — |
 | <img src=".github/assets/tools-icon/hark.png" width="28" alt="Hark" /> | Hark | Cotas diária e mensal do Hark Pro; sessão desktop no macOS ou cookie de sessão colado | — | ✅ | — |
 | <img src=".github/assets/tools-icon/opendesign.png" width="28" alt="OpenDesign" /> | OpenDesign | Cotas de cinco horas e semanais para o workspace atual; Cookie manual | — | ✅ | — |
@@ -284,7 +288,7 @@ O Token Monitor suporta uso de tokens, verificação de limites da conta e detal
 - O acompanhamento do LM Studio cobre atualmente requisições compatíveis com OpenAI `/v1/chat/completions` e `/v1/responses` registradas nos logs do servidor. Conversas iniciadas na interface de chat integrada do LM Studio e requisições nativas `/api/v1/chat` não são incluídas.
 - O Unsloth Studio acompanha o uso de inferência a partir do `studio.db`: os chats do Studio e a sua API local. A inferência local tem custo de API zero; provedores medidos reconhecidos usam as estimativas de preço do Tokscale. Tokens de treinamento não são incluídos. Veja as [notas da origem do Unsloth](docs/providers/unsloth.md).
 - O Devin acompanha as sessões do Devin CLI no `sessions.db` local e as sessões de agente do Devin Desktop nos logs ACP `acp-events`; quando ambos cobrem a mesma sessão, o banco do CLI é a fonte autoritativa. A cobertura do Desktop depende do agente ACP conectado: apenas agentes que gravam eventos `usage_update` localmente são contados, e o agente `devin-cloud` padrão do Devin Desktop mede o uso no servidor, então uma configuração padrão do Desktop não informa tokens do Desktop. Os títulos das sessões e a atribuição de projetos vêm do banco do CLI. Veja as [notas da origem do Devin](docs/providers/devin.md).
-- O Notion AI usa APIs internas, com um cookie `token_v2` colado manualmente e um ID explícito de workspace Business/Enterprise. A validação usa apenas dados de teste; não há uma amostra real de resposta e a autenticação real aguarda aprovação. Não há obtenção automática de cookies nem garantia de API pública. Veja as [notas da origem do Notion](docs/providers/notion.md).
+- O Notion AI usa APIs internas, com um cookie `token_v2` colado manualmente e um ID explícito de workspace Business/Enterprise. O Token Monitor usa dados de teste que incluem uma resposta anonimizada de Standard e Select. Veja as [notas da origem do Notion](docs/providers/notion.md) para mais detalhes.
 - O Manus lê sessões desktop no macOS/Windows ou uma sessão web manual em qualquer SO, incluindo Linux. Créditos mensais, recarga e saldo usam o mesmo endpoint interno não documentado, sem garantia de compatibilidade. Veja as [notas da origem do Manus](docs/providers/manus.md).
 - O Hark lê a sessão desktop autenticada no macOS, ou um cookie de sessão colado em qualquer SO. Mostra os pools diário e mensal da conta. Veja as [notas da origem do Hark](docs/providers/hark.md).
 - O MiniMax Code lê o histórico local de sessões gravado pelo CLI em `~/.minimax` ou `MINIMAX_DATA_DIR` / `MAVIS_DATA_DIR` (também em `~/.mavis` e `~/.minimax-<profile>` / `~/.mavis-<profile>`), além das execuções capturadas com `tokscale headless mcode`; um turno encontrado nas duas fontes é contado uma única vez.
@@ -302,7 +306,7 @@ O Token Monitor suporta uso de tokens, verificação de limites da conta e detal
 |---------|-------------------------|------------|
 | Títulos de sessão | Claude Code, Codex, OpenCode, Cursor, Antigravity, Cline CLI, Factory Droid, Kimi CLI, Grok Build, Pi, Oh My Pi, OmO Native, MiMo, ZCode, CodeBuddy, WorkBuddy, Reasonix, DeepSeek Harness, Cherry Studio, Devin CLI, fx, MiniMax Code | — |
 | Uso por prompt/resposta e chamadas de ferramentas | Claude Code, Codex, OpenCode, Pi, Oh My Pi, OmO Native, CodeBuddy, WorkBuddy, Reasonix, DeepSeek Harness | Os detalhes são lidos localmente e não são sincronizados. |
-| Uso de contexto/espaço restante | Claude Code, Codex, DeepSeek Harness | O limite de contexto do Claude Code é estimado pelo modelo. |
+| Uso de contexto/espaço restante | Claude Code, Codex, DeepSeek Harness, Grok Build, WorkBuddy, CatPaw | O limite de contexto do Claude Code é estimado pelo modelo. |
 | Uso de cache/taxa de acerto do cache da sessão | Fontes com campos de cache, por exemplo: Claude Code, Codex, OpenCode, Cursor, Kimi, Pi, Oh My Pi, OmO Native, DeepSeek Harness | A taxa de acerto aparece quando há dados de uso de cache. |
 | Estimativa de tempo restante do cache | Claude Code | 5 minutos ou 1 hora, conforme o tipo de cache registrado. |
 | Velocidade de saída/taxa de consumo de tokens | Claude Code, Codex, OpenCode, Antigravity, Kimi, GitHub Copilot, Pi, Oh My Pi, OmO Native, Kilo CLI, MiMo Code/MiMo Desktop, Muse Code, ZCode CLI, Kiro, DeepSeek Harness, Devin CLI | Saída em `tok/s` e consumo total de tokens em `tok/min`; o tempo pode incluir espera. |
