@@ -23,9 +23,7 @@ const CUSTOM_SCAN_PATH_LIMIT_ERRORS = Object.freeze({
 // similarly misleading. Keep both controls hidden rather than accepting paths
 // that appear healthy but contribute no usage. Token Monitor's Kilo row combines
 // the `kilo` CLI database and `kilocode` extension sources; the former rejects
-// extra roots, so persisted Kilo roots are forwarded to the latter. MiniMax
-// Code's runtime store is read by the fork only from its data directories, so
-// an extra `mcode` root would reach upstream's headless-capture scan alone.
+// extra roots, so persisted Kilo roots are forwarded to the latter.
 // Goose selects one database from its fixed/env candidates; extra directories
 // are ignored by the pinned scanner.
 // Derived rows (claude-desktop) are split out of their parent's scan and have
@@ -39,7 +37,6 @@ const UNSUPPORTED_CUSTOM_SCAN_CLIENTS = new Set([
   'opencode',
   'cursor',
   'goose',
-  'mcode',
   'proma'
 ]);
 const CUSTOM_SCAN_CLIENT_IDS = Object.freeze(

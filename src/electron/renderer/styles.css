@@ -105,27 +105,19 @@
 }
 
 .limit-row[data-limit-history]:focus-visible { outline: 1px solid var(--accent); outline-offset: 4px; border-radius: 4px; }
-.limit-row[data-limit-history] .limit-meter-fill::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: linear-gradient(to bottom, rgba(255, 255, 255, .18), transparent 55%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .24);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 140ms ease;
+/* Hover is carried by the mark itself rather than a selection box: a rail ring or
+   a history-capable limit meter glows in its own colour. One cue for both
+   surfaces (the edge dock loads this sheet too). The meter glows rather than its
+   fill: a filter applies after the meter's own rounded clip, which the scaled
+   fill's corners need. */
+.edge-dock-cell.is-focused .edge-dock-ring-fill,
+.limit-row[data-limit-history]:is(:hover, :focus-visible, .is-history-active) .limit-meter {
+  filter: drop-shadow(0 0 3px var(--mark-glow-color));
 }
-.limit-row[data-limit-history]:is(:hover, :focus-visible, .is-history-active) .limit-meter-fill {
-  filter: saturate(1.12) brightness(1.06);
-}
-.limit-row[data-limit-history]:is(:hover, :focus-visible, .is-history-active) .limit-meter-fill::after {
-  opacity: 1;
-}
-:root[data-reduce-motion="on"] .limit-row[data-limit-history] .limit-meter-fill,
-:root[data-reduce-motion="on"] .limit-row[data-limit-history] .limit-meter-fill::after { transition: none; }
+.limit-row[data-limit-history] .limit-meter { transition: filter 180ms ease; }
+:root[data-reduce-motion="on"] .limit-row[data-limit-history] .limit-meter { transition: none; }
 @media (prefers-reduced-motion: reduce) {
-  :root:not([data-reduce-motion="off"]) .limit-row[data-limit-history] .limit-meter-fill::after { transition: none; }
+  :root:not([data-reduce-motion="off"]) .limit-row[data-limit-history] .limit-meter { transition: none; }
 }
 * { box-sizing: border-box; }
 html, body {
@@ -1949,18 +1941,16 @@ span.settings-note.settings-item-desc {
   white-space: pre;
   tab-size: 2;
 }
-.sync-connection-fields { display: grid; min-width: 0; }
-.sync-connection-fields > :not([hidden]) ~ :not([hidden]) { margin-top: 8px; }
 .sync-connection-editor,
 .sync-device-settings { display: grid; min-width: 0; gap: 8px; }
-.sync-connection-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
-.sync-connection-status { display: inline-flex; align-items: center; gap: 8px; min-height: 24px; }
+.sync-connection-heading { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .hub-profile-picker { display: flex; min-width: 0; }
 /* Sits in the status card where the endpoint line was, so it reads as that
    line with a disclosure rather than as another boxed field. */
 .settings-panel .hub-profile-picker .select-control-trigger {
   width: auto;
-  max-width: 100%;
+  /* The negative side margins pull the trigger 6px past each edge of its box. */
+  max-width: calc(100% + 12px);
   margin: -2px -6px;
   padding: 2px 6px;
   gap: 6px;
@@ -1973,7 +1963,6 @@ span.settings-note.settings-item-desc {
 .settings-panel .hub-profile-picker .select-control-trigger:hover,
 .settings-panel .hub-profile-picker .select-control-trigger[aria-expanded="true"] { color: var(--text); background: rgba(var(--overlay-rgb), 0.06); }
 .settings-panel .hub-profile-remove { margin-left: auto; color: var(--red); }
-.sync-connection-heading .sync-connection-edit { margin-left: auto; }
 .settings-panel .sync-connection-edit,
 .settings-panel .sync-device-side .device-delete-button {
   display: inline-grid;
@@ -2018,7 +2007,7 @@ span.settings-note.settings-item-desc {
 .settings-panel .sync-connection-edit:focus-visible { background: rgba(var(--overlay-rgb), 0.06); }
 .settings-panel .sync-connection-edit:focus-visible,
 .settings-panel .sync-device-side .device-delete-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.sync-connection-identity { display: grid; min-width: 0; margin-left: 22px; gap: 2px; color: var(--muted); font-size: 0.625rem; line-height: 1.5; }
+.sync-connection-identity { display: flex; flex: 0 1 auto; min-width: 0; max-width: 100%; }
 #syncConnectionEndpoint { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: clip; }
 #syncConnectionCancel { background: transparent; }
 #hubClientFields { container-type: inline-size; }
@@ -2218,14 +2207,6 @@ button.settings-help-trigger:focus-visible { outline: 1px solid var(--accent); o
   to { transform: rotate(360deg); }
 }
 .sync-panel-state { display: grid; gap: 2px; min-width: 0; }
-.sync-panel-state strong { color: var(--text); font-size: 0.6875rem; font-weight: 500; }
-.sync-panel-state > span {
-  margin-left: 22px;
-  color: var(--muted);
-  font-size: 0.625rem;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
 .sync-panel-connection[data-state="disconnected"] #syncPanelDetail { color: var(--red); }
 .sync-panel-build {
   color: var(--muted);
@@ -2327,36 +2308,190 @@ button.settings-help-trigger:focus-visible { outline: 1px solid var(--accent); o
 .settings-panel .sync-device-side .device-delete-button { margin-top: 0; }
 .settings-panel .sync-device-side .device-delete-button:hover,
 .settings-panel .sync-device-side .device-delete-button[data-confirm="true"] { color: var(--red); background: rgba(var(--overlay-rgb), 0.06); }
-.sync-panel-link {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  width: 100%;
-  padding: 9px 0 2px;
-  border: 0;
-  border-top: 1px solid rgba(var(--line-rgb), 0.07);
-  background: transparent;
-  color: var(--muted);
-  font-size: 0.625rem;
-  text-align: left;
-  cursor: pointer;
-  transition: color 120ms ease, background 120ms ease;
-}
-.sync-panel-link:hover,
-.sync-panel-link:focus-visible { color: var(--text); background: rgba(var(--overlay-rgb), 0.03); }
-.sync-panel-link-arrow::before { content: '→'; display: inline-block; transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1); }
-.sync-panel-link:hover .sync-panel-link-arrow::before { transform: translateX(2px); }
 @container (max-width: 240px) {
   .sync-device-side { grid-template-columns: minmax(0, 1fr); }
   .sync-device-action { height: auto; }
 }
 :root[data-reduce-motion="on"] .sync-panel-signal > svg { animation: none !important; }
-:root[data-reduce-motion="on"] .sync-panel-link-arrow::before { transition: none; }
 @media (prefers-reduced-motion: reduce) {
   :root:not([data-reduce-motion="off"]) .sync-panel-signal > svg { animation: none !important; }
-  :root:not([data-reduce-motion="off"]) .sync-panel-link-arrow::before { transition: none; }
 }
+/* Multi-device sync is drawn as a map: the sync target on top, and every
+   device hanging off one rail beneath it. Icons sit on a 30px column whose
+   centre carries the rail; text and forms start on the column after it. */
+/* The sync method heads the card: it decides what the map below shows. The
+   picker spans the card so each method's description fits its menu row. */
+.sync-map-head {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(var(--line-rgb), 0.08);
+}
+.sync-map-label { color: var(--muted); font-size: 0.6875rem; }
+#syncSettingsDetails .sync-map {
+  --rail: rgba(var(--line-rgb), 0.18);
+  display: grid;
+  min-width: 0;
+  padding: 12px 12px 0;
+}
+.sync-map > * { min-width: 0; }
+.sync-node {
+  --node-rgb: 163, 173, 187;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: 10px;
+  min-width: 0;
+}
+.sync-node-icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: rgba(var(--node-rgb), 0.12);
+  box-shadow: inset 0 0 0 1px rgba(var(--node-rgb), 0.3);
+  color: rgb(var(--node-rgb));
+}
+.sync-node-icon svg,
+.sync-node-icon .sync-panel-signal,
+.sync-node-icon .sync-panel-signal > svg { width: 15px; height: 15px; flex-basis: 15px; }
+.sync-node-text { display: grid; gap: 2px; min-width: 0; padding-top: 1px; }
+.sync-node-title,
+.sync-node #hubStatusRow,
+.sync-node #icloudStatus {
+  width: auto;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.sync-node-sub { color: var(--muted); font-size: 0.625rem; line-height: 1.45; overflow-wrap: anywhere; }
+.sync-node-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; min-width: 0; margin-top: 1px; }
+/* The state colour tints the pill; the label keeps text contrast in both themes. */
+.sync-node-state {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(var(--node-rgb), 0.14);
+  box-shadow: inset 0 0 0 1px rgba(var(--node-rgb), 0.35);
+  color: var(--text);
+  font-size: 0.5625rem;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.sync-node-placeholder .sync-node-icon {
+  background: transparent;
+  box-shadow: none;
+  border: 1px dashed rgba(var(--line-rgb), 0.4);
+  color: var(--muted);
+}
+.sync-node-placeholder { padding-bottom: 12px; }
+/* The node colour follows what each mode reports about its target. */
+#syncPanelConnection.sync-node { --node-rgb: var(--signal-rgb); padding: 0; }
+.sync-map-hub:has(#hubStatusRow.ok) .sync-node,
+.sync-map-hub:has(#icloudStatus.ok) .sync-node { --node-rgb: var(--success-rgb); }
+.sync-map-hub:has(#hubStatusRow.error) .sync-node,
+.sync-map-hub:has(#icloudStatus.error) .sync-node { --node-rgb: 244, 119, 136; }
+.sync-node #hubStatusRow.error,
+.sync-node #icloudStatus.error { color: var(--red); }
+.sync-panel-state .sync-panel-build::before { content: none; }
+#syncConnectionIdentity #syncConnectionEndpoint { font: inherit; }
+.settings-panel .sync-map .hub-profile-picker .select-control-trigger { color: var(--text); font-weight: 600; }
+.settings-panel .sync-node > .sync-connection-edit {
+  align-self: start;
+  grid-template-columns: 12px;
+  width: 26px;
+  height: 26px;
+  min-height: 0;
+  margin: -1px -4px 0 0;
+  padding: 0;
+  font-size: 0;
+  color: var(--muted);
+}
+.settings-panel .sync-node > .sync-connection-edit:hover { color: var(--text); }
+/* Forms that act on the target take the full card width under a divider, so
+   long URLs and secrets fit at 340px. Notices stay plain and close. */
+.sync-map-form { padding-top: 12px; border-top: 1px solid rgba(var(--line-rgb), 0.08); }
+#syncMap .sync-map-hub > .accordion-animation-inner > .sync-map-form:not([hidden]) { margin-top: 12px; }
+#syncMap .sync-map-hub > .accordion-animation-inner > .sync-map-notice:not([hidden]) { margin-top: 8px; }
+/* Spacing below an open target. A pseudo-element, unlike padding, collapses with
+   the accordion when the mode's fields close. */
+.sync-map-hub > .accordion-animation-inner::after { content: ""; height: 12px; }
+#syncDeviceSettings.sync-map-form { padding-bottom: 12px; }
+#syncConnectionSaveError.sync-map-notice { width: auto; margin-bottom: 12px; }
+.sync-map .settings-actions { justify-content: flex-end; }
+.sync-share { display: grid; gap: 8px; min-width: 0; }
+.sync-share-secret { display: grid; gap: 4px; min-width: 0; }
+.sync-share-secret > label { color: var(--muted); font-size: 0.625rem; }
+.sync-share .settings-note { margin: 0; }
+.hub-address-extra { display: grid; gap: 5px; min-width: 0; }
+.hub-address-more {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-size: 0.625rem;
+  cursor: pointer;
+}
+.hub-address-more:hover { color: var(--text); }
+.hub-address-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The port is one short number: a labelled row, not a full-width field. */
+.settings-panel label.sync-port-field { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 0.625rem; }
+.settings-panel .sync-port-field input { flex: 0 0 84px; width: 84px; text-align: right; }
+/* Devices hang off one rail. It reaches up to the target only while nothing
+   sits between them; otherwise it starts at the first device. */
+.sync-map { --rail-link: transparent; }
+.sync-map:has(.sync-device-row):not(:has(> #syncDeviceSettings:not([hidden]))) { --rail-link: var(--rail); }
+.sync-map > .sync-map-hub { background: linear-gradient(var(--rail-link), var(--rail-link)) 14.5px 34px / 1px calc(100% - 34px) no-repeat; }
+.sync-map .sync-panel-heading { background: linear-gradient(var(--rail-link), var(--rail-link)) 14.5px 0 / 1px 100% no-repeat; }
+.sync-map .sync-panel { padding-top: 0; border-top: 0; }
+/* The count sits at the right edge, in line with each device's controls. */
+.sync-map .sync-panel-heading { padding: 0 0 4px 40px; }
+/* Each device icon sits on the rail, which breaks 5px above and below it. */
+.sync-map .sync-device-row {
+  --rail-above: var(--rail);
+  --rail-below: var(--rail);
+  position: relative;
+  grid-template-columns: 30px minmax(0, 1fr);
+  column-gap: 10px;
+  row-gap: 1px;
+  padding: 6px 0;
+  box-shadow: none;
+  background: linear-gradient(var(--rail-above) 0 4px, transparent 4px 24px, var(--rail-below) 24px) 14.5px 0 / 1px 100% no-repeat;
+}
+.sync-map .sync-device-row:first-child { --rail-above: var(--rail-link); }
+.sync-map .sync-device-row:last-child { --rail-below: transparent; }
+.sync-map .sync-device-mark { position: relative; grid-row: 1 / span 2; align-self: start; margin-top: 3px; }
+.sync-map .sync-device-title,
+.sync-map .sync-device-meta,
+.sync-map .sync-device-side { grid-column: 2; }
+.sync-map .sync-device-badge {
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(var(--accent-rgb), 0.14);
+  color: var(--accent);
+  font-weight: 500;
+  line-height: 1.6;
+}
+/* A version notice is a quiet line in the text column, clear of the rail. */
+#syncMap .hub-build-status { width: auto; margin-left: 40px; padding: 0; border: 0; background: none; }
+.sync-map .sync-device-empty { padding: 4px 0 12px 40px; }
+.sync-this-device > .settings-item[hidden] + .settings-item { border-top: 0; }
+/* With neither row shown, the disclosure opens the card and needs no divider above it. */
+.sync-this-device > .settings-item[hidden] + .settings-item[hidden] + .theme-color-accordion { margin-top: 0; padding-top: 0; border-top: 0; }
 .currency-rate-row { display: grid; gap: 4px; min-width: 0; }
 /* The rate row is a sub-setting of the Currency row: keep them as one unseparated pair. */
 .settings-subgroup > .settings-item + .currency-rate-row { margin-top: 0; }
@@ -4744,6 +4879,8 @@ html.is-windows .settings-panel select option {
   stroke-width: 2;
   stroke-linecap: round;
   stroke-linejoin: round;
+  /* The SVG stretches with preserveAspectRatio="none"; keep the stroke 2px in screen space. */
+  vector-effect: non-scaling-stroke;
 }
 .home-trend-head {
   display: flex;
@@ -6250,7 +6387,7 @@ html.is-windows .limit-live-badge {
   border-radius: 3px;
   transform: scaleX(var(--bar-scale, 0));
   transform-origin: left center;
-  transition: transform 420ms cubic-bezier(0.22, 1, 0.36, 1), filter 140ms ease;
+  transition: transform 420ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 .limit-meter-completion {
   position: absolute;
@@ -8308,6 +8445,9 @@ html.native-liquid-glass .view-switcher-menu-item { border-radius: 9px; }
 .main-view-link:is(:hover, :focus-visible)::after { background: currentColor; }
 :is(.main-view-link, .main-view-back):focus-visible { outline: 1px solid rgba(var(--accent-rgb), 0.72); outline-offset: 1px; }
 .main-view-subpage { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; }
+.main-view-back { display: inline-flex; align-items: center; gap: 8px; min-height: 28px; padding: 4px 8px; margin: 0 0 12px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--text); font: inherit; font-size: .6875rem; cursor: pointer; }
+.main-view-back::before { content: ''; width: 12px; height: 12px; flex: 0 0 12px; background: currentColor; -webkit-mask: url("icons/actions/chevron-down.svg") center / contain no-repeat; mask: url("icons/actions/chevron-down.svg") center / contain no-repeat; transform: rotate(90deg); }
+.main-view-back:hover { background: rgba(var(--overlay-rgb), .09); }
 .main-view-inspector .main-view-back { justify-self: start; margin: -4px 0 6px -6px; }
 .main-view-subpage-title { margin: 0 0 4px; color: var(--text); font-size: 0.75rem; font-weight: 600; }
 .settings-panel .main-view-subpage > .settings-nested-list { margin: 0; padding: 0; border-left: 0; }
@@ -10142,69 +10282,150 @@ html.native-liquid-glass .view-switcher-menu-item { border-radius: 9px; }
 .plugin-credential-form { display: grid; gap: 8px; }
 .plugin-credential-summary { align-items: center; }
 .plugin-credential-summary > .settings-note, .plugin-credential-error { margin: 0; }
-/* Display settings keep mounted controls; navigation has no height animation. */
-.settings-section-details-inner > .display-settings { min-width: 0; margin-top: 0; }
+/* Window display surfaces: top 5-tile switcher + card-grouped controls. */
+.settings-section-details-inner > .display-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  margin-top: 6px;
+  margin-bottom: 10px;
+}
 .display-settings .settings-window-group { margin-top: 0; padding-top: 0; border-top: 0; }
-.display-settings-list { margin-top: 8px; border-top: 1px solid var(--line); }
-.display-settings-row { display: flex; align-items: center; gap: 12px; border-bottom: 1px solid rgba(var(--line-rgb), .12); }
-.display-settings-open { display: flex; flex: 1; align-items: center; gap: 12px; min-width: 0; padding: 16px 0; border: 0; background: none; text-align: left; color: inherit; }
-.display-settings-row:first-child .display-settings-open { padding-top: 10px; }
-.display-settings-labels { display: grid; gap: 5px; min-width: 0; }
-.display-settings-labels .settings-item-desc { margin: 0; }
-.display-settings-thumb { flex: 0 0 66px; height: 43px; position: relative; border: 1px solid rgba(var(--line-rgb), .3); border-radius: 5px; background: rgba(var(--line-rgb), .05); overflow: hidden; }
-.display-settings-thumb::before { content: ''; position: absolute; inset: 0 0 auto; height: 4px; background: rgba(var(--line-rgb), .12); }
-.display-settings-thumb i { position: absolute; background: var(--text); opacity: .65; }
-.display-settings-thumb-main i { inset: 12px 14px 8px; border-radius: 3px; }
-.display-settings-thumb-edge i { width: 7px; height: 27px; top: 9px; right: 0; border-radius: 4px 0 0 4px; }
-.display-settings-thumb-notch i { width: 30px; height: 8px; top: 0; left: 18px; border-radius: 0 0 5px 5px; }
-.display-settings-thumb-bubble i { width: 25px; height: 10px; left: 50%; top: 50%; transform: translate(-50%, -50%); border-radius: 8px; }
-.display-settings-thumb-tray i { width: 19px; height: 3px; top: 1px; right: 5px; }
-.display-settings[data-edge-side=left] .display-settings-thumb-edge i { right: auto; left: 0; border-radius: 0 4px 4px 0; }
+.display-settings-dock {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+  gap: 5px;
+}
+.display-settings-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 7px 3px 6px;
+  border: 1px solid rgba(var(--line-rgb), .18);
+  border-radius: 10px;
+  background: rgba(var(--panel-rgb), .2);
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.625rem;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+.display-settings-tile:hover {
+  background: rgba(var(--overlay-rgb), .06);
+  color: var(--text);
+}
+.display-settings-tile[aria-selected="true"] {
+  border-color: rgba(var(--accent-rgb), .55);
+  background: rgba(var(--accent-rgb), .12);
+  color: var(--text);
+  font-weight: 500;
+}
+.display-settings-tile-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(var(--line-rgb), .32);
+  transition: background 140ms ease, box-shadow 140ms ease;
+}
+.display-settings-tile.is-enabled .display-settings-tile-dot {
+  background: var(--success);
+  box-shadow: 0 0 6px rgba(var(--success-rgb), .55);
+}
+.display-settings-tile-label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.display-settings-thumb {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 22px;
+  position: relative;
+  border: 1px solid rgba(var(--line-rgb), .34);
+  border-radius: 4px;
+  background: rgba(var(--line-rgb), .06);
+  overflow: hidden;
+}
+.display-settings-thumb::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  height: 3px;
+  background: rgba(var(--line-rgb), .16);
+}
+.display-settings-thumb i {
+  position: absolute;
+  background: var(--text);
+  opacity: .68;
+}
+.display-settings-tile[aria-selected="true"] .display-settings-thumb {
+  border-color: rgba(var(--accent-rgb), .55);
+  background: rgba(var(--accent-rgb), .08);
+}
+.display-settings-tile[aria-selected="true"] .display-settings-thumb i {
+  background: var(--accent);
+  opacity: 1;
+}
+.display-settings-thumb-main i { inset: 6px 7px 4px; border-radius: 2px; }
+.display-settings-thumb-edge i { width: 4px; height: 14px; top: 5px; right: 0; border-radius: 2px 0 0 2px; }
+.display-settings-thumb-notch i { width: 15px; height: 5px; top: 0; left: 9px; border-radius: 0 0 3px 3px; }
+.display-settings-thumb-bubble i { width: 13px; height: 5px; left: 50%; top: 50%; transform: translate(-50%, -50%); border-radius: 4px; }
+.display-settings-thumb-tray i { width: 11px; height: 2px; top: 0.5px; right: 2.5px; border-radius: 1px; }
+.display-settings[data-edge-side=left] .display-settings-thumb-edge i { right: auto; left: 0; border-radius: 0 2px 2px 0; }
 .display-settings[data-platform=win32] .display-settings-thumb::before { top: auto; bottom: 0; }
-.display-settings[data-platform=win32] .display-settings-thumb-tray i { top: auto; bottom: 1px; }
+.display-settings[data-platform=win32] .display-settings-thumb-tray i { top: auto; bottom: 0.5px; }
 .display-settings[data-platform=linux] .display-settings-thumb::before { display: none; }
-.display-settings[data-platform=linux] .display-settings-thumb-tray i { width: 10px; height: 10px; top: 50%; right: auto; left: 50%; transform: translate(-50%, -50%); border-radius: 2px; }
-/* Match the plugin settings' back action and category-tab typography. */
-.display-settings-back { display: inline-flex; align-items: center; gap: 8px; min-height: 28px; padding: 4px 8px; margin: 0 0 12px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--text); font: inherit; font-size: .6875rem; cursor: pointer; }
-.display-settings-back::before { content: ''; width: 12px; height: 12px; flex: 0 0 12px; background: currentColor; -webkit-mask: url("icons/actions/chevron-down.svg") center / contain no-repeat; mask: url("icons/actions/chevron-down.svg") center / contain no-repeat; transform: rotate(90deg); }
-.display-settings-back:hover { background: rgba(var(--overlay-rgb), .09); }
-.display-settings-quick, .display-settings-states { display: flex; gap: 3px; padding: 3px; border-radius: 8px; background: rgba(var(--line-rgb), .06); }
-.display-settings-quick { margin-bottom: 16px; }
-.display-settings-quick button, .display-settings-states button { flex: 1; min-width: 0; padding: 7px 3px; border: 0; border-radius: 5px; font-size: 11px; background: none; color: var(--muted); }
-.display-settings-quick [aria-selected=true], .display-settings-states [aria-pressed=true] { color: var(--text); background: rgba(var(--line-rgb), .13); }
-.display-settings-title .settings-item-title { font-size: 15px; }
-.display-settings-categories { display: flex; gap: 14px; margin-top: 18px; border-bottom: 1px solid var(--line); }
-.display-settings-categories button { min-height: 30px; padding: 5px 0 10px; background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; color: var(--muted); font: inherit; font-size: .6875rem; }
-.display-settings-categories [aria-selected=true] { border-bottom-color: var(--text); color: var(--text); }
-.display-settings-fields > * { margin-top: 4px; }
-/* A collapsed description between two rows must not break their shared separator. */
-.display-settings-fields > .settings-item + .presence-feature-body.hidden + .settings-item { margin-top: 0; border-top: 1px solid rgba(var(--line-rgb), .06); }
-.display-settings-preview { position: relative; height: 166px; margin: 12px 0 8px; overflow: hidden; border: 1px solid rgba(var(--line-rgb), .2); border-radius: 9px; background: rgba(var(--line-rgb), .06); contain: layout paint; }
-.display-settings-preview iframe { border: 0; position: absolute; left: 50%; top: 8px; transform-origin: top left; pointer-events: none; }
-.display-settings-preview-note { font-size: 10px; margin-top: 8px; }
-.display-settings-preview[data-surface=floatingBubble] { height: 64px; }
-.display-settings-preview[data-surface=tray] { height: 48px; }
-.display-settings-preview[data-surface=edgeDock] { height: 248px; }
-.display-settings-bitmap { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); display: flex; align-items: center; justify-content: center; width: max-content; min-width: 40px; max-width: calc(100% - 32px); padding: 6px 10px; border: 1px solid rgba(var(--line-rgb), .24); border-radius: 20px; white-space: nowrap; }
-.display-settings-bitmap img { height: 24px; width: auto; max-width: 100%; min-width: 0; object-fit: contain; }
-/* The edge-attached strip holds the full 24px content plus 8px on either side;
-   its background must not cut through a multi-row tray bitmap. */
-.display-settings-preview[data-surface=tray] .display-settings-bitmap { top: 0; left: 0; right: 0; width: auto; height: 40px; max-width: none; padding: 8px 12px; justify-content: flex-end; transform: none; border-radius: 0; border: 0; font-size: 12px; }
-.display-settings-preview[data-surface=tray]::before { content: ''; position: absolute; height: 40px; inset: 0 0 auto; background: rgba(var(--line-rgb), .1); }
-.display-settings[data-platform=win32] .display-settings-preview[data-surface=tray]::before { top: auto; bottom: 0; }
-.display-settings[data-platform=win32] .display-settings-preview[data-surface=tray] .display-settings-bitmap { top: auto; bottom: 0; }
-.display-settings[data-platform=linux] .display-settings-preview[data-surface=tray]::before { display: none; }
-.display-settings[data-platform=linux] .display-settings-preview[data-surface=tray] .display-settings-bitmap { top: 50%; transform: translateY(-50%); justify-content: center; }
+.display-settings[data-platform=linux] .display-settings-thumb-tray i { width: 6px; height: 6px; top: 50%; right: auto; left: 50%; transform: translate(-50%, -50%); border-radius: 1.5px; }
 
-.display-settings-open { font-size: .6875rem; cursor: pointer; }
-.display-settings-switch { flex: 0 0 34px; }
-.display-settings-open::after { content: ''; width: 12px; height: 12px; flex: 0 0 12px; background: var(--muted); -webkit-mask: url("icons/actions/chevron-down.svg") center / contain no-repeat; mask: url("icons/actions/chevron-down.svg") center / contain no-repeat; transform: rotate(-90deg); margin-left: auto; }
+/* clip, unlike the accordion's hidden, is not a scroll container, so the edge
+   dock composer's sticky detail pane sticks to the settings panel instead. */
+#windowSettingsDetails, #windowSettingsDetails .accordion-animation-inner { overflow: clip; }
+.display-settings-pages { display: grid; min-width: 0; }
+.display-settings-page { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.display-settings-page .settings-page-card {
+  margin-top: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(var(--panel-rgb), .22);
+}
+.display-settings-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  background: rgba(var(--panel-rgb), .32);
+}
+.display-settings-hero-text { display: grid; gap: 2px; min-width: 0; flex: 1 1 auto; }
+.display-settings-hero-title-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.display-settings-hero-title { color: var(--text); font-size: 0.78125rem; font-weight: 600; line-height: 1.3; }
+.display-settings-hero-sub { margin: 0; color: var(--muted); font-size: 0.625rem; line-height: 1.45; }
+.display-settings-hero-switch { flex: 0 0 auto; margin-top: 2px; }
+.display-settings-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  transition: opacity 160ms ease;
+}
+.display-settings-cards.is-disabled-surface { opacity: .55; }
+/* Rows sit flush with hairline dividers like the other settings cards, even
+   when a wrapper, composer or hidden row separates them in the DOM. The
+   subblock only groups rows that hide with their parent switch. */
+.display-settings-card > :not(.settings-group-header) + *,
+.display-settings-subblock > * { margin-top: 0; }
+.display-settings-card > :not(.settings-group-header) + .settings-item,
+.display-settings-subblock > .settings-item { border-top: 1px solid rgba(var(--line-rgb), .06); }
 .display-settings button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-.display-settings-preview[data-surface=notch] { height: 100px; }
-
-.display-settings-page-flat > .display-settings-fields:not([hidden]) { margin-top: 8px; padding-top: 4px; border-top: 1px solid var(--line); }
-.display-settings-page-flat > .display-settings-fields > :first-child { margin-top: 0; }
 
 .plugin-about { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .plugin-about h3, .plugin-about .settings-note { margin: 0; }
