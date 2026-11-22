@@ -40,7 +40,9 @@ function descendantPrefix(root) {
 // checkpoints. Tokscale still traverses the complete tree on each Kiro scan;
 // pruning watcher paths alone cannot make frequent scans cheap. Keep this
 // source on interval/manual collection until the scanner bounds it too.
-const INTERVAL_ONLY_SOURCE_CHECK_IDS = new Set(['kiro-ide-globalstorage']);
+// `claude-desktop-app` is Claude Desktop's userData root: a presence check for
+// the derived row, whose transcripts are already watched through `claude`.
+const INTERVAL_ONLY_SOURCE_CHECK_IDS = new Set(['kiro-ide-globalstorage', 'claude-desktop-app']);
 
 // The watcher only ever wants paths, so it keeps its original shape rather than
 // learning about check ids it would immediately discard.
