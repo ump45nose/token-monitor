@@ -479,6 +479,8 @@ Object.assign(els, {
   edgeDockMoreOptionsDetails: document.getElementById('edgeDockMoreOptionsDetails'),
   edgeDockSideInputs: Array.from(document.querySelectorAll('input[name="edgeDockSide"]')),
   edgeDockModeInputs: Array.from(document.querySelectorAll('input[name="edgeDockMode"]')),
+  edgeDockTriggerRangeRow: document.getElementById('edgeDockTriggerRangeRow'),
+  edgeDockTriggerRangeInputs: Array.from(document.querySelectorAll('input[name="edgeDockTriggerRange"]')),
   edgeDockBubbleSizeInputs: Array.from(document.querySelectorAll('input[name="edgeDockBubbleSize"]')),
   edgeDockBubbleCustomScaleRow: document.getElementById('edgeDockBubbleCustomScaleRow'),
   edgeDockBubbleCustomScaleInput: document.getElementById('edgeDockBubbleCustomScaleInput'),
@@ -525,6 +527,7 @@ Object.assign(els, {
   secretPasteButton: document.getElementById('secretPasteButton'),
   hubStatusRow: document.getElementById('hubStatusRow'),
   syncDevicePanel: document.getElementById('syncDevicePanel'),
+  syncMap: document.getElementById('syncMap'),
   syncPanelConnection: document.getElementById('syncPanelConnection'),
   syncPanelSignal: document.getElementById('syncPanelSignal'),
   syncPanelState: document.getElementById('syncPanelState'),
@@ -533,7 +536,6 @@ Object.assign(els, {
   syncPanelBuild: document.getElementById('syncPanelBuild'),
   syncPanelCount: document.getElementById('syncPanelCount'),
   syncDeviceList: document.getElementById('syncDeviceList'),
-  syncPanelOpenDevices: document.getElementById('syncPanelOpenDevices'),
   hubAddressList: document.getElementById('hubAddressList'),
   syncUploadIntervalInput: document.getElementById('syncUploadIntervalInput'),
   collectionCadenceInput: document.getElementById('collectionCadenceInput'),
@@ -686,6 +688,7 @@ const syncModeSelect = window.TokenMonitorSelectControl?.enhance(els.hubModeOpti
   getOptionMeta: option => ({ description: t(SYNC_MODE_DESCRIPTIONS[option.value]), icon: syncModeIcons[option.value] })
 });
 window.addEventListener('unload', () => syncModeSelect?.destroy(), { once: true });
+for (const slot of document.querySelectorAll('[data-sync-icon]')) slot.replaceChildren(syncModeIcons[slot.dataset.syncIcon](document));
 window.addEventListener('unload', () => {
   for (const select of document.querySelectorAll('.device-icon-select, #deviceIconInput')) deviceIconsApi.destroyDeviceIconSelect(select);
 }, { once: true });
@@ -830,7 +833,7 @@ let displaySettings = null;
 function applySettingsSectionDom(id, open) {
   if (id === 'sync' && !open) { syncModeSelect?.close(); syncContentForm?.closeHelp(); }
   if (id === 'appearance' && !open) appearanceColorPicker.close();
-  if (id === 'window' && !open) stopWindowShortcutRecording();
+  if (id === 'window' && !open) { stopWindowShortcutRecording(); displaySettings?.close?.(); }
   const toggle = document.querySelector(`[data-settings-section="${id}"]`);
   const details = document.getElementById(`${id}SettingsDetails`);
   const group = toggle?.closest('.settings-collapsible-group');
@@ -890,11 +893,13 @@ function shouldAnchorSettingsScroll(section, expanding) {
   return SETTINGS_SECTION_IDS.slice(0, sectionIndex).some(id => state.settingsSections[id]);
 }
 
-function anchorSettingsScroll(anchorEl, mutate) {
+// targetOffset pins the header at that distance from the panel top instead of
+// where it currently sits.
+function anchorSettingsScroll(anchorEl, mutate, targetOffset) {
   cancelSettingsScrollAnchor();
   const panel = els.settingsPanel;
   if (!panel || !anchorEl) { mutate(); return; }
-  const offset = anchorEl.getBoundingClientRect().top - panel.getBoundingClientRect().top;
+  const offset = targetOffset ?? anchorEl.getBoundingClientRect().top - panel.getBoundingClientRect().top;
   mutate();
   const reducedMotion = prefersReducedMotion();
   const deadline = performance.now() + SETTINGS_SCROLL_ANCHOR_MS;
@@ -2507,20 +2512,10 @@ function animateHomeHistoryVisuals(activityScroll, activityCanvas, trendChart) {
     });
   });
 
-  const line = trendChart?.querySelector('.area-line-stroke');
-  const fill = trendChart?.querySelector('.area-line-fill');
-  const length = line?.getTotalLength?.() || 0;
-  if (length > 0) {
-    line.animate([
-      { strokeDasharray: `${length} ${length}`, strokeDashoffset: length },
-      { strokeDasharray: `${length} ${length}`, strokeDashoffset: 0 }
-    ], {
-      duration: HOME_HISTORY_MOTION_MS,
-      easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
-      fill: 'backwards'
-    });
-  }
-  fill?.animate([
+  // Wipe the line and its fill in together. A dash-offset draw-in would need the
+  // on-screen path length: the stroke is non-scaling, so dashes are laid out in
+  // screen space while getTotalLength() reports stretched viewBox units.
+  trendChart?.querySelector('.area-line')?.animate([
     { clipPath: 'inset(0 100% 0 0)' },
     { clipPath: 'inset(0 0 0 0)' }
   ], {
@@ -6483,8 +6478,12 @@ function openSettingsPanel(section) {
   // the count unrefreshed; main's cache decides whether this goes to GitHub.
   if (state.settingsSections?.general) void refreshAboutStars();
   if (section === 'notch') {
-    setSettingsSectionExpanded('window', true);
-    displaySettings?.open('notch');
+    // Tile clicks keep the scroll position; this outside entry point holds the
+    // Window header at the panel top, including while a section above collapses.
+    anchorSettingsScroll(document.querySelector('[data-settings-section="window"]'), () => {
+      setSettingsSectionExpanded('window', true);
+      displaySettings?.open('notch');
+    }, 0);
   }
   els.shell.style.transform = 'translateZ(0)';
   requestAnimationFrame(() => { els.shell.style.transform = ''; });
@@ -6498,6 +6497,7 @@ function openViewFromTray(viewId) {
   syncModeSelect?.close();
   syncContentForm?.closeHelp();
   appearanceColorPicker.close();
+  displaySettings?.close();
   els.settingsPanel?.classList.add('hidden');
   els.shell.classList.remove('settings-open');
   state.untrackedWithDataProbed = null;
@@ -8528,6 +8528,7 @@ async function refreshStats(options = {}) {
     allTimeSessions.invalidate();
     state.stats = sessionStatsForDisplay(allTimeSessions.attach(nextStats));
     observeDisplayLiveTokenRates(nextStats);
+    if (typeof signalHibernateRevealIfReady === 'function') signalHibernateRevealIfReady();
     if (options.forceHistory === true) {
       // A manual history rescan is an explicit retry boundary. Let Home request the
       // corresponding full payload even when its revision is unchanged, and restore
@@ -9708,6 +9709,12 @@ function syncHubModeUi() {
     els.icloudFields.classList.toggle('hidden', mode !== 'icloud');
     els.icloudFields.inert = mode !== 'icloud';
   }
+  // Blocks outside the per-mode field groups name the modes they belong to.
+  for (const node of els.syncMap.querySelectorAll('[data-sync-modes]')) {
+    const shown = node.dataset.syncModes.split(' ').includes(mode);
+    node.hidden = !shown;
+    node.inert = !shown;
+  }
   if (mode === 'host') {
     els.hubSecretInput.value = state.settings.hubHostSecret || '';
     renderHubStatus();
@@ -9888,7 +9895,6 @@ function stopSyncPanelAgeTimer() {
 function renderSyncPanelDevices(rows) {
   const counts = syncDevicePanelApi.deviceCounts(rows);
   els.syncPanelCount.textContent = counts.total > 0 ? t('settings.sync.panel.onlineCount', counts) : '';
-  els.syncPanelOpenDevices.hidden = counts.total === 0 || !availableBreakdownIds().includes('device');
   const list = els.syncDeviceList;
   const scope = JSON.stringify([
     state.settings?.hubMode, state.mode, state.settings?.deviceId,
@@ -10081,6 +10087,26 @@ function renderHubBuildStatus() {
   els.hubBuildStatus.hidden = false;
 }
 
+let hubAddressesExpanded = false;
+function hubAddressRow(addr, port) {
+  const url = `http://${addr.address}:${port}`;
+  const row = document.createElement('div');
+  row.className = 'hub-address-row';
+  const code = document.createElement('code');
+  code.textContent = url;
+  const ifaceLabel = document.createElement('span');
+  ifaceLabel.className = 'hub-address-iface';
+  ifaceLabel.textContent = addr.interface;
+  const copy = document.createElement('button');
+  copy.type = 'button';
+  copy.className = 'icon-button';
+  copy.setAttribute('aria-label', t('settings.sync.copyUrl', { url }));
+  copy.textContent = '⧉';
+  copy.addEventListener('click', () => copyToClipboard(url, copy));
+  row.append(code, ifaceLabel, copy);
+  return row;
+}
+
 function renderHubAddresses(addresses, port) {
   els.hubAddressList.replaceChildren();
   if (addresses.length === 0) {
@@ -10090,28 +10116,34 @@ function renderHubAddresses(addresses, port) {
     els.hubAddressList.appendChild(empty);
     return;
   }
+  // Lead with the network card other devices most likely share, not a VPN or
+  // virtual adapter; the rest stay one click away.
+  const physical = addr => /^(en|eth|wl|wi-?fi|ethernet)/i.test(String(addr.interface || ''));
+  const ordered = [...addresses.filter(physical), ...addresses.filter(addr => !physical(addr))];
   const header = document.createElement('div');
   header.className = 'hub-address-header';
   header.textContent = t('settings.sync.connectWith');
-  els.hubAddressList.appendChild(header);
-  for (const addr of addresses) {
-    const url = `http://${addr.address}:${port}`;
-    const row = document.createElement('div');
-    row.className = 'hub-address-row';
-    const code = document.createElement('code');
-    code.textContent = url;
-    const ifaceLabel = document.createElement('span');
-    ifaceLabel.className = 'hub-address-iface';
-    ifaceLabel.textContent = addr.interface;
-    const copy = document.createElement('button');
-    copy.type = 'button';
-    copy.className = 'icon-button';
-    copy.setAttribute('aria-label', t('settings.sync.copyUrl', { url }));
-    copy.textContent = '⧉';
-    copy.addEventListener('click', () => copyToClipboard(url, copy));
-    row.append(code, ifaceLabel, copy);
-    els.hubAddressList.appendChild(row);
-  }
+  els.hubAddressList.append(header, hubAddressRow(ordered[0], port));
+  const rest = ordered.slice(1);
+  if (rest.length === 0) return;
+  const extra = document.createElement('div');
+  extra.className = 'hub-address-extra';
+  extra.id = 'hubAddressExtra';
+  extra.hidden = !hubAddressesExpanded;
+  extra.append(...rest.map(addr => hubAddressRow(addr, port)));
+  const more = document.createElement('button');
+  more.type = 'button';
+  more.className = 'hub-address-more';
+  more.setAttribute('aria-expanded', String(hubAddressesExpanded));
+  more.setAttribute('aria-controls', extra.id);
+  more.textContent = hubAddressesExpanded ? t('settings.sync.fewerAddresses') : t('settings.sync.moreAddresses', { count: rest.length });
+  more.addEventListener('click', () => {
+    hubAddressesExpanded = !hubAddressesExpanded;
+    renderHubAddresses(addresses, port);
+    els.hubAddressList.querySelector('.hub-address-more')?.focus({ preventScroll: true });
+  });
+  // The toggle precedes the rows it reveals, so Tab reaches them next.
+  els.hubAddressList.append(more, extra);
 }
 
 async function copyToClipboard(text, button) {
@@ -11252,7 +11284,7 @@ function renderHomeLimitProviderList() {
   page.className = 'main-view-subpage';
   const back = document.createElement('button');
   back.type = 'button';
-  back.className = 'display-settings-back main-view-back';
+  back.className = 'main-view-back';
   back.textContent = t('views.home');
   back.addEventListener('click', () => setHomeLimitProvidersOpen(false));
   const title = document.createElement('strong');
@@ -14623,6 +14655,14 @@ if (pluginBridge) {
   pluginBridge.onChanged(() => void refreshPluginCatalog());
 }
 
+let hibernateRevealPending = false;
+
+function signalHibernateRevealIfReady() {
+  if (!hibernateRevealPending || !initialSettingsApplied || !state.stats) return;
+  hibernateRevealPending = false;
+  window.tokenMonitor.signalAppearanceReady?.();
+}
+
 async function init() {
   // Subscribe before querying: a native appearance/accessibility change can
   // arrive while the initial state round trip is in flight.
@@ -14679,11 +14719,22 @@ async function init() {
   // Tray startup also needs its saved appearance prepared before native show.
   applyVisibleSettingsAppearance();
   initialSettingsApplied = true;
-  if (state.windowVisible) {
+  // A tray action can arrive at did-finish-load, before this asynchronous init
+  // finishes. Replay it now, before the window can announce appearance, so the
+  // first painted frame is the requested view or settings section.
+  flushPendingTrayOpen();
+  const hibernateReveal = new URLSearchParams(window.location.search).get('hibernateReveal') === '1';
+  if (hibernateReveal) {
+    // Do not reveal the recreated popover on the static zero defaults. Wait for
+    // the first real stats snapshot; the main process still falls back after
+    // its short wake timeout if stats do not arrive.
+    hibernateRevealPending = true;
+    signalHibernateRevealIfReady();
+  } else if (state.windowVisible) {
     const signalAppearanceReady = () => window.tokenMonitor.signalAppearanceReady?.();
     // A retained WebContentsView can be document.hidden until its native host
     // shows. Prepare it now, without waiting on animation frames that pause while
-    // hidden. windowVisible still excludes intentionally hidden tray startup.
+    // hidden.
     if (document.hidden) signalAppearanceReady();
     else requestAnimationFrame(() => requestAnimationFrame(signalAppearanceReady));
   }
@@ -14917,6 +14968,7 @@ els.settingsButton.addEventListener('click', (event) => {
     syncModeSelect?.close();
     syncContentForm?.closeHelp();
     appearanceColorPicker.close();
+    displaySettings?.close();
     resetSettingsListSearch();
     stopWindowShortcutRecording();
     state.untrackedWithDataProbed = null;
@@ -15032,8 +15084,6 @@ els.hubProfileRemove?.addEventListener('click', async () => {
   cancelClientConnectionEdit();
   await changeHubProfile({ type: 'delete', id: state.settings?.activeHubProfileId });
 });
-
-els.syncPanelOpenDevices?.addEventListener('click', () => openViewFromTray('device'));
 
 els.hubModeOptions.addEventListener('change', async (event) => {
   const target = event.target;
@@ -15585,6 +15635,9 @@ function syncDockControls() {
   const modes = (els.edgeDockModeInputs || []).map((input) => input.value);
   const mode = modes.includes(state.settings?.edgeDockMode) ? state.settings.edgeDockMode : 'autoHide';
   for (const input of els.edgeDockModeInputs || []) input.checked = input.value === mode;
+  els.edgeDockTriggerRangeRow?.classList.toggle('hidden', mode === 'always' || floating);
+  const triggerRange = state.settings?.edgeDockTriggerRange ?? 'rail';
+  for (const input of els.edgeDockTriggerRangeInputs || []) input.checked = input.value === triggerRange;
   syncDockSizeControls('edgeDock');
   syncDockSizeControls('edgeDockBubble');
   syncDockSizeControls('notch');
@@ -15766,6 +15819,11 @@ els.edgeDockHapticInput?.addEventListener('change', () => {
 for (const input of els.edgeDockModeInputs || []) {
   input.addEventListener('change', () => {
     if (input.checked) void saveSettings({ edgeDockMode: input.value });
+  });
+}
+for (const input of els.edgeDockTriggerRangeInputs || []) {
+  input.addEventListener('change', () => {
+    if (input.checked) void saveSettings({ edgeDockTriggerRange: input.value });
   });
 }
 for (const surface of ['edgeDock', 'edgeDockBubble', 'notch']) {
@@ -16056,8 +16114,39 @@ reducedMotionMedia?.addEventListener?.('change', () => {
   applyReduceMotionPreference('system');
 });
 
-window.tokenMonitor.onOpenSettings?.(openSettingsPanel);
-window.tokenMonitor.onOpenView?.(openViewFromTray);
+// The main process sends tray navigation as soon as did-finish-load fires,
+// which can be earlier than the asynchronous settings load above. Dispatching
+// then would open the panel or switch views against the default state; keep the
+// last request until init has applied the saved settings instead.
+let pendingTrayOpen = null;
+
+function dispatchTrayOpen(request) {
+  // An explicit tray view outranks the saved startup preference. Consume the
+  // one-time preference so the later syncSettingsForm() cannot replace it; a
+  // plugin page as the last view leaves the query seed absent, so this is not
+  // already covered by initialViewState.
+  if (request.kind === 'view') initialBreakdownPreferenceApplied = true;
+  if (request.kind === 'view') openViewFromTray(request.value);
+  else openSettingsPanel(request.value);
+}
+
+function handleTrayOpenRequest(kind, value) {
+  if (!initialSettingsApplied || !state.settings) {
+    pendingTrayOpen = { kind, value };
+    return;
+  }
+  dispatchTrayOpen({ kind, value });
+}
+
+function flushPendingTrayOpen() {
+  if (!pendingTrayOpen) return;
+  const request = pendingTrayOpen;
+  pendingTrayOpen = null;
+  dispatchTrayOpen(request);
+}
+
+window.tokenMonitor.onOpenSettings?.((section) => handleTrayOpenRequest('settings', section));
+window.tokenMonitor.onOpenView?.((viewId) => handleTrayOpenRequest('view', viewId));
 
 window.tokenMonitor.onFloatingBubbleState?.((payload) => {
   applyFloatingBubbleState(payload);
@@ -16221,6 +16310,7 @@ window.tokenMonitor.onStatsPush?.((payload) => {
     state.stats = sessionStatsForDisplay(allTimeSessions.attach(incomingStats));
     observeLiveTokenRate(state.stats);
     observeDisplayLiveTokenRates(state.stats);
+    if (typeof signalHibernateRevealIfReady === 'function') signalHibernateRevealIfReady();
     applyCodexActiveAccountFromStats();
     // Progressive mid-tick pushes never carry a fresh history scan (see
     // AGENTS.md collector notes), so only the final push can retire the
@@ -17372,7 +17462,6 @@ function refreshTrayComposers() {
     createTrayComposer
   );
   Object.values(trayComposers).forEach((composer) => composer?.refresh());
-  displaySettings?.refreshLivePreview();
   syncCustomTrayClockTimer();
 }
 
@@ -18293,14 +18382,11 @@ setupSettingsAccordion(
   document.getElementById('syncContentDetails'), expanded => syncContentForm.setExpanded(expanded)
 );
 setupSettingsSections();
-const displaySettingsPreview = window.TokenMonitorDisplaySettingsPreview.create({
-  window, document, bridge: window.tokenMonitor, settings: () => state.settings,
-  bitmap: trayComposerPreview, stats: () => state.stats, t
-});
 displaySettings = window.TokenMonitorDisplaySettings.create({
   document, root: document.getElementById('windowSettingsDetails').querySelector('.settings-section-details-inner'),
-  scrollPanel: els.settingsPanel, t, platform: () => state.appInfo?.platform, settings: () => state.settings,
-  preview: displaySettingsPreview.show, cancelScroll: cancelSettingsScrollAnchorOnInteraction,
+  t, platform: () => state.appInfo?.platform, settings: () => state.settings,
+  helpPopover: window.TokenMonitorHelpPopover,
+  cancelScroll: cancelSettingsScrollAnchorOnInteraction,
   stopWindowShortcutRecording
 });
 let legacyAccountOwners;
