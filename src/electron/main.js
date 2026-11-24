@@ -628,6 +628,7 @@ function defaultSettings() {
     showLiveDot: true,
     showToolIcons: true,
     titleIconOnly: true,
+    settingsInTitlebar: false,
     showCompactTotalTokens: false,
     showLiveTokenRate: false,
     liveTokenRateScope: 'all',
@@ -762,6 +763,7 @@ function defaultSettings() {
     limitsHistoryOpenMode: 'hover',
     claudePrepaidBalanceEnabled: parseBoolean(process.env.TOKEN_MONITOR_CLAUDE_PREPAID_BALANCE, true),
     claudeCliFallbackEnabled: true,
+    antigravityLocalLimitsEnabled: true,
     // The key OpenCode stores for itself needs no setup, so tracking it is the
     // default. This turns that off for a machine that is signed in to an account
     // the user does not want reported.
@@ -806,6 +808,33 @@ function defaultSettings() {
       lastKnownLatest: null,
       dismissedVersion: null
     }
+  };
+}
+
+function resettableSettingsDefaults() {
+  const defaults = defaultSettings();
+  const keys = [
+    'language', 'startAtLogin', 'automaticAppUpdates', 'discordRpcEnabled',
+    'periodMonthMode', 'currency', 'heatmapMetric', 'homeActiveDaysWindow', 'showExactHomeTrendTokens',
+    'homeModuleCounts', 'homeLimitDisplayMode', 'showHomeLimitBars', 'showHomeLimitProviderNames', 'homeLimitAccountCount',
+    'historyIntervalMs', 'sessionContextMetric', 'limitsHistoryOpenMode', 'modelRankingMetric', 'serviceStatusRefreshMs',
+    'windowBehavior', 'keepAboveTaskbar', 'floatingBubbleTrigger', 'floatingBubbleContent',
+    'hideAppIcon', 'trayContent', 'showTrayProviderBadge',
+    'edgeDockMode', 'edgeDockTriggerRange', 'edgeDockSide', 'edgeDockSize', 'edgeDockCustomScale',
+    'edgeDockBubbleSize', 'edgeDockBubbleCustomScale', 'edgeDockMacBackdrop', 'edgeDockWindowsBackdrop',
+    'edgeDockRunningIndicatorEnabled', 'edgeDockWarnColors', 'edgeDockHaptic',
+    'notchHoverAction', 'notchShape', 'notchSize', 'notchCustomScale',
+    'notchStyle', 'notchProgressiveBlur', 'notchSummaryEnabled', 'notchSummaryMode',
+    'notchHideSummaryInFullScreen', 'notchRunningIndicatorEnabled', 'notchWarnColors', 'notchHaptic', 'notchSwipeGestures',
+    'systemGlass', 'windowsBackdrop', 'macBackdrop', 'textSize', 'reduceMotion', 'tokenNumberAnimation',
+    'showCompactTotalTokens', 'compactTokenUnits', 'showLiveTokenRate', 'liveTokenRateScope',
+    'settingsInTitlebar', 'showLiveDot', 'showToolIcons', 'titleIconOnly',
+    'collectionMode', 'exportIntervalMs',
+    'showLimitSource', 'showLimitUsed', 'workbuddyQuotaTotalEnabled', 'syncUploadIntervalMs'
+  ];
+  return {
+    ...Object.fromEntries(keys.map(key => [key, defaults[key]])),
+    limitsRefresh: defaults.limitsRefreshMode === 'adaptive' ? 'adaptive' : String(defaults.limitsRefreshMs)
   };
 }
 
@@ -2117,6 +2146,7 @@ function readSettings() {
     merged.homeLimitDisplayMode = normalizeHomeLimitDisplayMode(merged.homeLimitDisplayMode);
     merged.showHomeLimitProviderNames = parseBoolean(merged.showHomeLimitProviderNames, false);
     merged.claudeCliFallbackEnabled = parseBoolean(merged.claudeCliFallbackEnabled, true);
+    merged.antigravityLocalLimitsEnabled = parseBoolean(merged.antigravityLocalLimitsEnabled, true);
     merged.codexResetForecastEnabled = parseBoolean(merged.codexResetForecastEnabled, false);
     merged.workbuddyQuotaTotalEnabled = parseBoolean(merged.workbuddyQuotaTotalEnabled, false);
     merged.limitsHistoryOpenMode = ['hover', 'click', 'off'].includes(merged.limitsHistoryOpenMode) ? merged.limitsHistoryOpenMode : 'hover';
@@ -2739,7 +2769,8 @@ function electronPresentationStats(stats) {
   const limitOptions = {
     localDeviceId: settings?.deviceId,
     syncActive: syncProvenanceActive(),
-    opencodeLocalLimitsEnabled: settings?.opencodeLocalLimitsEnabled === true
+    opencodeLocalLimitsEnabled: settings?.opencodeLocalLimitsEnabled === true,
+    antigravityLocalLimitsEnabled: settings?.antigravityLocalLimitsEnabled !== false
   };
   const aliases = settings?.modelAliases;
   const grouping = settings?.modelAliasGrouping;
@@ -8034,6 +8065,7 @@ app.whenReady().then(() => {
     const previousFloatingBubbleCustomLayout = JSON.stringify(settings.floatingBubbleCustomLayout || {});
     const previousShowTrayProviderBadge = settings.showTrayProviderBadge;
     const previousOpenCodeLocalLimitsEnabled = settings.opencodeLocalLimitsEnabled === true;
+    const previousAntigravityLocalLimitsEnabled = settings.antigravityLocalLimitsEnabled !== false;
     const previousCurrency = settings.currency;
     const previousCompactTokenUnits = settings.compactTokenUnits;
     const previousLanguage = settings.language;
@@ -8257,6 +8289,7 @@ app.whenReady().then(() => {
       limitsHistoryOpenMode: ['hover', 'click', 'off'].includes(patch.limitsHistoryOpenMode ?? settings.limitsHistoryOpenMode) ? (patch.limitsHistoryOpenMode ?? settings.limitsHistoryOpenMode) : 'hover',
       claudePrepaidBalanceEnabled: parseBoolean(patch.claudePrepaidBalanceEnabled ?? settings.claudePrepaidBalanceEnabled, true),
       claudeCliFallbackEnabled: parseBoolean(patch.claudeCliFallbackEnabled ?? settings.claudeCliFallbackEnabled, true),
+      antigravityLocalLimitsEnabled: parseBoolean(patch.antigravityLocalLimitsEnabled ?? settings.antigravityLocalLimitsEnabled, true),
       codexResetForecastEnabled: parseBoolean(patch.codexResetForecastEnabled ?? settings.codexResetForecastEnabled, false),
       workbuddyQuotaTotalEnabled: parseBoolean(patch.workbuddyQuotaTotalEnabled ?? settings.workbuddyQuotaTotalEnabled, false),
       showCodexAdditionalLimits: parseBoolean(patch.showCodexAdditionalLimits ?? settings.showCodexAdditionalLimits, true),
@@ -8424,7 +8457,8 @@ app.whenReady().then(() => {
       if (settings.discordRpcEnabled && latestStats) updateDiscordRpcDisplay(latestStats);
       refreshExchangeRates();              // async: fetch if stale, then re-push
     }
-    if ((settings.opencodeLocalLimitsEnabled === true) !== previousOpenCodeLocalLimitsEnabled) {
+    if ((settings.opencodeLocalLimitsEnabled === true) !== previousOpenCodeLocalLimitsEnabled
+      || (settings.antigravityLocalLimitsEnabled !== false) !== previousAntigravityLocalLimitsEnabled) {
       // Re-project the cached aggregate immediately. The Hub can be offline and
       // therefore may not send another frame after this local-only setting changes.
       refreshLimitStatsPresentation();
@@ -8674,6 +8708,7 @@ app.whenReady().then(() => {
     return repositoryStars.get();
   });
   ipcMain.handle('app:getInfo', () => ({
+    resettableSettingsDefaults: resettableSettingsDefaults(),
     notchCapabilities: notchController?.getCapabilities() || null,
     version: app.getVersion(),
     platform: process.platform,
