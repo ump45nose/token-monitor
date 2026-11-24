@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { CLIENT_IDS, FORK_ONLY_CLIENT_IDS } = require('./clientCatalog');
+const { CLIENT_IDS, DERIVED_CLIENT_IDS, FORK_ONLY_CLIENT_IDS } = require('./clientCatalog');
 const { LEGACY_CLIENT_ID_ALIASES } = require('./clientTracking');
 const { tokscaleCustomScanClientIds } = require('./tokscaleClientMapping');
 
@@ -25,11 +25,15 @@ const CUSTOM_SCAN_PATH_LIMIT_ERRORS = Object.freeze({
 // the `kilo` CLI database and `kilocode` extension sources; the former rejects
 // extra roots, so persisted Kilo roots are forwarded to the latter.
 // Goose selects one database from its fixed/env candidates; extra directories
+// are ignored by the pinned scanner.
+// Derived rows (claude-desktop) are split out of their parent's scan and have
+// no tokscale roots of their own; extra roots belong on the parent.
 // are ignored by the pinned scanner. Proma never offered extra roots while it
 // was fork-only; offering them is a separate feature from moving its parser
 // upstream, so they stay hidden.
 const UNSUPPORTED_CUSTOM_SCAN_CLIENTS = new Set([
   ...FORK_ONLY_CLIENT_IDS,
+  ...DERIVED_CLIENT_IDS,
   'opencode',
   'cursor',
   'goose',

@@ -474,7 +474,7 @@
   }
 
   function sessionRowDetailAvailable(row) {
-    return ['claude', 'codebuddy', 'codex', 'opencode', 'dsh', 'workbuddy', 'pi', 'omp', 'senpi'].includes(row?.client)
+    return ['claude', 'claude-desktop', 'codebuddy', 'codex', 'opencode', 'dsh', 'workbuddy', 'pi', 'omp', 'senpi'].includes(row?.client)
       || (row?.client === 'reasonix' && row?.sessionDetailAvailable === true);
   }
 
