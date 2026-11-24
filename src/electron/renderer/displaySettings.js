@@ -254,10 +254,10 @@
       const heroSub = make('p', 'display-settings-hero-sub');
       heroText.append(heroTitleRow, heroSub);
 
-      const originalLabel = input.closest('label');
+      const originalRow = input.closest('.settings-item') || input.closest('label');
       const switchLabel = make('label', 'checkbox-label display-settings-hero-switch');
       switchLabel.append(input);
-      if (originalLabel) originalLabel.hidden = true;
+      if (originalRow) originalRow.hidden = true;
 
       hero.append(heroText, switchLabel);
 

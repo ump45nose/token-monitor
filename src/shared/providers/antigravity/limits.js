@@ -188,10 +188,22 @@ function rpcSourceKeyForAccount(sourceDetail, accountKey, deps = {}) {
   return deps.providerRuntimeState.get(RPC_SOURCE_BINDINGS_STATE_KEY)?.get(`${sourceDetail}:${accountKey}`) || '';
 }
 
+function anonymousRpcRemoval(reading, options, deps) {
+  if (!reading?.accountEmail || reading.status !== 'ok' || !reading.rpcSourceKey) return null;
+  const previous = options.previousLimits?.providers?.find(row =>
+    row.provider === 'antigravity' && row.source === 'rpc' && !row.accountEmail
+    && row.sourceDetail === reading.sourceDetail && row.accountKey
+    && rpcSourceKeyForAccount(row.sourceDetail, row.accountKey, deps) === reading.rpcSourceKey);
+  if (!previous) return null;
+  return { provider: 'antigravity', accountKey: previous.accountKey, removed: true,
+    replacementAccount: { accountKey: reading.accountKey } };
+}
+
 async function fetchAntigravityLimits(options = {}, deps = {}) {
   if (options.antigravityAccountSlots?.length) options = { ...options, antigravityManagedAccounts: mergedOwnerAccounts(options, 'antigravity', options.antigravityManagedAccounts || []).map(account => ({ ...account, credentials: account.credentials })) };
   const nowMs = (deps.now || Date.now)();
   const probeFn = deps.antigravityProbe || antigravityProbe.probe;
+  const localEnabled = options.antigravityLocalLimitsEnabled !== false;
   const scope = options.limitRefreshScope?.provider === 'antigravity' ? options.limitRefreshScope : null;
   const accounts = antigravityOAuth.normalizeManagedAccounts(
     options.antigravityManagedAccounts || deps.antigravityManagedAccounts,
@@ -217,11 +229,14 @@ async function fetchAntigravityLimits(options = {}, deps = {}) {
     ? remembered
     : null;
 
-  if (accounts.length === 0 && !scope) {
+  if (localEnabled && accounts.length === 0 && !scope) {
     try {
       const local = mapAntigravitySnapshot(await probeFn(deps), { nowMs, source: 'rpc' });
+      // Remember the address first: the removal below only rewrites the
+      // previous anonymous row, it does not replace this reading.
       observeLocalAccount(local, deps);
-      return local;
+      const removal = anonymousRpcRemoval(local, options, deps);
+      return removal ? [local, removal] : local;
     } catch (error) {
       const base = {
         provider: 'antigravity',
@@ -253,7 +268,7 @@ async function fetchAntigravityLimits(options = {}, deps = {}) {
     }
   }
 
-  const localPromise = scope?.sourceDetail === 'oauth'
+  const localPromise = scope || !localEnabled
     ? Promise.resolve(null)
     : probeFn(deps).then(
         (snapshot) => mapAntigravitySnapshot(snapshot, { nowMs, source: 'rpc' }),
@@ -286,9 +301,12 @@ async function fetchAntigravityLimits(options = {}, deps = {}) {
     if (duplicateIndex < 0) {
       providers.unshift(local);
     } else if (local.status === 'ok') {
-      providers[duplicateIndex] = mergeMissingOAuthGroups(local, providers[duplicateIndex]);
+      const oauthReading = providers[duplicateIndex];
+      providers[duplicateIndex] = { ...mergeMissingOAuthGroups(local, oauthReading), oauthReading };
     }
   }
+  const removal = anonymousRpcRemoval(local, options, deps);
+  if (removal) providers.push(removal);
   return providers;
 }
 
