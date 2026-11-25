@@ -443,7 +443,8 @@ Object.assign(els, {
   projectBreakdownFooterModels: document.getElementById('projectBreakdownFooterModels'),
   monthPeriodMenu: document.getElementById('monthPeriodMenu'),
   monthPeriodTab: document.getElementById('monthPeriodTab'),
-  periodMonthModeInput: document.getElementById('periodMonthModeInput')
+  periodMonthModeInput: document.getElementById('periodMonthModeInput'),
+  billingCycleStartDayInput: document.getElementById('billingCycleStartDayInput')
 });
 Object.assign(els, {
   appTitleMark: document.querySelector('.app-title-mark'),
@@ -3543,7 +3544,9 @@ function fixedPeriodDevices() {
   const localDevice = state.fixedPeriodSnapshot?.native
     ? devices.find(device => device.deviceId === state.settings?.deviceId)
     : undefined;
-  return fixedPeriodRangesApi.devicesForReadySnapshot(state.fixedPeriodSnapshot, state.period, localDevice);
+  return fixedPeriodRangesApi.devicesForReadySnapshot(state.fixedPeriodSnapshot, state.period, localDevice, {
+    cycleStartDay: state.settings?.billingCycleStartDay
+  });
 }
 
 function fixedPeriodSources() {
@@ -3559,7 +3562,8 @@ function buildFixedPeriodSourcesSnapshot() {
     historyEnabled: state.settings?.historyEnabled !== false,
     historyAvailable: meta.historyTransportAvailable === true,
     todayKey: fixedPeriodTodayKey(),
-    locale: currentCalendarLocale()
+    locale: currentCalendarLocale(),
+    cycleStartDay: state.settings?.billingCycleStartDay
   });
 }
 
@@ -6683,7 +6687,8 @@ function buildFixedPeriodSnapshot() {
   if (state.fixedPeriodHistoryBusy) {
     const ready = fixedPeriodRangesApi.readySnapshotForSelection(
       state.fixedPeriodSnapshot,
-      state.period
+      state.period,
+      { cycleStartDay: state.settings?.billingCycleStartDay }
     );
     return ready
       ? ready
@@ -9169,7 +9174,11 @@ function applyAppearanceSettings(settings) {
   const systemGlassDisabled = settings?.systemGlass === false;
   const isWindows = navigator.userAgent.toLowerCase().includes('windows');
   const isMac = navigator.userAgent.includes('Macintosh');
-  const windowsGlass = windowsGlassApi.appearanceState(settings, { isWindows });
+  const windowsGlass = windowsGlassApi.appearanceState(settings, {
+    isWindows,
+    osRelease: state.appInfo?.osRelease,
+    accentActive: (settings?.windowsAccentActive ?? state.settings?.windowsAccentActive) === true
+  });
   const macGlass = macBackdropApi.appearanceState(settings, {
     liquidGlassSupported: nativeMaterialState.liquidGlassSupported
   });
@@ -9242,6 +9251,7 @@ function applyAppearanceSettings(settings) {
   document.body.classList.remove('is-windows-glass');
   
   document.documentElement.classList.toggle('is-windows', isWindows);
+  document.documentElement.classList.toggle('windows-accent-square', windowsGlass.squareCorners);
   document.body.classList.toggle('is-windows', isWindows);
   
   document.documentElement.classList.toggle('is-mac-legacy', isMacLegacyRadius);
@@ -11357,6 +11367,9 @@ function syncSettingsForm() {
     els.periodMonthModeInput.closest('.period-default-setting').classList.toggle('hidden', Boolean(state.settings.periodTabOrder?.length));
   }
   syncPeriodTabSettings();
+  if (els.billingCycleStartDayInput && document.activeElement !== els.billingCycleStartDayInput) {
+    els.billingCycleStartDayInput.value = String(fixedPeriodRangesApi.normalizeCycleStartDay(state.settings?.billingCycleStartDay));
+  }
   if (els.currencyInput) els.currencyInput.value = currentCurrency();
   syncCurrencyRateControls();
   syncNetworkProxyControls();
@@ -15787,6 +15800,28 @@ async function saveDefaultUsageRange(value) {
 }
 
 els.periodMonthModeInput?.addEventListener('change', () => saveDefaultUsageRange(els.periodMonthModeInput.value));
+
+els.billingCycleStartDayInput?.addEventListener('change', async () => {
+  const day = fixedPeriodRangesApi.normalizeCycleStartDay(els.billingCycleStartDayInput.value);
+  els.billingCycleStartDayInput.value = String(day);
+  state.settings.billingCycleStartDay = day;
+  if (state.period === 'cycle') {
+    state.rowSignature = '';
+    render();
+  }
+  try {
+    await saveSettings({ billingCycleStartDay: day });
+  } catch (_) {
+    // saveSettings already reloaded and rendered the persisted settings, but
+    // render skips a focused input. Put the persisted day back unless a newer
+    // edit has replaced the rejected value since.
+    if (els.billingCycleStartDayInput.value === String(day)) {
+      els.billingCycleStartDayInput.value = String(
+        fixedPeriodRangesApi.normalizeCycleStartDay(state.settings?.billingCycleStartDay)
+      );
+    }
+  }
+});
 
 document.addEventListener('click', (event) => {
   if (!state.periodMenuOpen) return;
