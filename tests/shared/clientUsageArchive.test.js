@@ -723,7 +723,7 @@ test('a disabled Claude Desktop split reaches both apply and prune', () => {
         capturedAt: now.toISOString(),
         day: localDayKey(now),
         month: localDayKey(now).slice(0, 7),
-        clientIdentityGeneration: 3,
+        clientIdentityGeneration: CLIENT_IDENTITY_GENERATION,
         periods: { today: period, month: period, allTime: period }
       }
     }

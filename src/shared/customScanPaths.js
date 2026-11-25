@@ -25,12 +25,11 @@ const CUSTOM_SCAN_PATH_LIMIT_ERRORS = Object.freeze({
 // the `kilo` CLI database and `kilocode` extension sources; the former rejects
 // extra roots, so persisted Kilo roots are forwarded to the latter.
 // Goose selects one database from its fixed/env candidates; extra directories
-// are ignored by the pinned scanner.
-// Derived rows (claude-desktop) are split out of their parent's scan and have
-// no tokscale roots of their own; extra roots belong on the parent.
 // are ignored by the pinned scanner. Proma never offered extra roots while it
 // was fork-only; offering them is a separate feature from moving its parser
-// upstream, so they stay hidden.
+// upstream, so they stay hidden. Derived rows (claude-desktop) are split out
+// of their parent's scan and have no tokscale roots of their own; extra roots
+// belong on the parent.
 const UNSUPPORTED_CUSTOM_SCAN_CLIENTS = new Set([
   ...FORK_ONLY_CLIENT_IDS,
   ...DERIVED_CLIENT_IDS,
@@ -134,11 +133,27 @@ function customScanPathsFingerprint(value, options = {}) {
 }
 
 function tokscaleExtraDirsEnv(value, inherited = '', options = {}) {
-  const additions = customScanPathEntries(value, options).flatMap(({ client, dir }) => (
-    suppressedCustomScanIds(client, dir, options)
-      .map((scanId) => `${scanId}:${dir}`)
-  ));
-  return [String(inherited || '').trim(), ...additions].filter(Boolean).join(',');
+  const entries = customScanPathEntries(value, options);
+  const mod = platformPath(options.platform || process.platform);
+  const acp = (options.antigravityAcpPaths || [])
+    .filter(dir => suppressedCustomScanIds('antigravity', dir, options).includes('antigravity-cli'))
+    .map(dir => ({ dir, canonical: canonicalDir(dir, options) }));
+  const automatic = acp.filter(({ canonical }) => !entries.some(({ client, dir }) => {
+    if (client !== 'antigravity') return false;
+    const root = canonicalDir(dir, options);
+    // A manually selected parent can contain other conversations as well.
+    return root !== canonical && dirContains(root, canonical, mod)
+      && suppressedCustomScanIds(client, dir, options).includes('antigravity-cli');
+  }));
+  const additions = entries.flatMap(({ client, dir }) => {
+    const ids = suppressedCustomScanIds(client, dir, options);
+    const covered = client === 'antigravity' && automatic.some(({ canonical }) => (
+      dirContains(canonical, canonicalDir(dir, options), mod)
+    ));
+    return ids.filter(id => !(covered && id === 'antigravity-cli')).map(id => `${id}:${dir}`);
+  });
+  return [String(inherited || '').trim(), ...additions, ...automatic.map(({ dir }) => `antigravity-cli:${dir}`)]
+    .filter(Boolean).join(',');
 }
 
 function platformPath(platform) {

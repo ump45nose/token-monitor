@@ -829,19 +829,6 @@ function createLimitsRuntime(initialOptions = {}, deps = {}) {
         if (commitAcceptedReading && rowIdentityKey(committedRow) === identityKey) {
           commitAcceptedReading(rawRowsByReading.get(row), committedRow, providerRuntimeState);
         }
-        // A successful account-keyed Desktop local reading supersedes the generic
-        // provider:* placeholder left by an earlier notConfigured/unauthorized
-        // probe. Leaving that placeholder around lets aggregateLimits treat it as a
-        // fresh observation and drop the real (often older-timestamped) local
-        // reading — Claude Desktop local-only rows use the sample time as
-        // updatedAt, so they go stale within minutes while the empty failure stays
-        // "fresh". Other providers keep the anonymous row: it is still the only
-        // state a provider-wide probe reported (see the removal-marker tests).
-        if (committedRow.source === 'local' && identityKey !== `${lane.provider}:*`
-          && lane.identities.has(`${lane.provider}:*`)) {
-          lane.identities.delete(`${lane.provider}:*`);
-          represented.add(`${lane.provider}:*`);
-        }
       }
     }
 

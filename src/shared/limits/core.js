@@ -589,28 +589,6 @@ function isConfiguredProvider(provider) {
     && !providerPolicies[provider.provider]?.isPlaceholder?.(provider));
 }
 
-// A fresh empty failure (notConfigured / unavailable with no windows) must not
-// count as an observation that licenses dropping a stale success. Claude Desktop
-// local-only rows keep the sample timestamp as updatedAt, so they go "stale"
-// while a leftover provider-level failure from before local-only stayed "fresh"
-// and erased the bars.
-function isUsefulLimitObservation(provider) {
-  if (!provider) return false;
-  if (provider.status === 'ok' || provider.status === 'rateLimited' || provider.status === 'sourceRateLimited') {
-    return true;
-  }
-  if (Array.isArray(provider.windows) && provider.windows.length > 0) return true;
-  if (provider.balance != null || provider.balanceUsd != null) return true;
-  return false;
-}
-
-// Claude Desktop local-only rows are read from a sample file on one machine.
-// Another device reporting an empty failure only means that device has no
-// Desktop data; it says nothing about this account being signed out.
-function isLocalSampleProvider(provider) {
-  return Boolean(provider && provider.provider === 'claude' && provider.source === 'local' && provider.accountKey);
-}
-
 function providerCollapseKey(provider, multiAccount = false) {
   // A device that reports several accounts keeps every keyed row per account,
   // ahead of the provider-specific rules below.
@@ -627,14 +605,6 @@ function providerCollapseKey(provider, multiAccount = false) {
 
 function providerWindowRank(provider) {
   const windowCount = Array.isArray(provider?.windows) ? provider.windows.length : 0;
-  // Antigravity quota groups are gated by the client version a device sends
-  // (Gemini 4 Argon needs a newer Hub identity). While devices run mixed
-  // builds, the same account must not flip between a full and a partial set
-  // depending on which device refreshed last, so rank by real quota groups.
-  // A synthetic Balance (credits) window is not a quota group.
-  if (provider?.provider === 'antigravity') {
-    return (provider.windows || []).filter((window) => window?.metric !== 'credits').length;
-  }
   return providerPolicies[provider?.provider]?.snapshotRank?.(windowCount) || 0;
 }
 
@@ -689,9 +659,6 @@ function aggregateLimits(devices, staleAfterMs = 0, nowMs = Date.now()) {
   const providersWithConfiguredAccounts = new Set();
   const providersWithFreshConfiguredAccounts = new Set();
   const providersWithFreshObservations = new Set();
-  // Candidate rows that are fresh, by freshness key: the Desktop local sample
-  // rule below needs to know whether a fresh peer carries a real observation.
-  const freshCandidatesByProvider = new Map();
   // Lanes with a configured account: the freshness key without its account
   // part, so a source-scoped provider keeps its lanes apart and an
   // account-scoped one is still one lane.
@@ -710,17 +677,9 @@ function aggregateLimits(devices, staleAfterMs = 0, nowMs = Date.now()) {
         providersWithConfiguredAccounts.add(freshnessKey);
         configuredLanes.add(providerFreshnessKey({ ...provider, accountKey: '' }));
       }
-      // A stale Desktop sample still proves the account is configured, so an
-      // empty failure from another device must not replace it.
-      if (isLocalSampleProvider(provider) && isConfiguredProvider(provider)) {
-        providersWithFreshConfiguredAccounts.add(freshnessKey);
-      }
       if (!candidate.stale) {
         providersWithFreshObservations.add(freshnessKey);
         if (isConfiguredProvider(provider)) providersWithFreshConfiguredAccounts.add(freshnessKey);
-        const list = freshCandidatesByProvider.get(freshnessKey) || [];
-        list.push(candidate);
-        freshCandidatesByProvider.set(freshnessKey, list);
       }
       const key = providerAggregateKey(candidate);
       if (candidate.provider === 'opencode' && isConfiguredProvider(candidate)) {
@@ -768,22 +727,10 @@ function aggregateLimits(devices, staleAfterMs = 0, nowMs = Date.now()) {
     // with no stable identity of its own (Muse Code beside web accounts) stays.
     if (multiAccount && !candidate.accountKey
       && configuredLanes.has(providerFreshnessKey({ ...candidate, accountKey: '' }))) continue;
-    const freshPeers = freshCandidatesByProvider.get(freshnessKey) || [];
-    // A fresh empty failure (on any device) eclipses a stale row, so a
-    // signed-out Codex or Claude account does not keep showing old quota. The
-    // one exception is a Claude Desktop local sample: it ages by the Desktop
-    // sample timestamp, and an empty failure only means that lane or device has
-    // no Desktop data, not that the account signed out.
-    const hasEclipsingFreshObservation = freshPeers.some((peer) => (
-      isUsefulLimitObservation(peer) || !isLocalSampleProvider(candidate)
-    ));
     const hasFreshObservation = providersWithFreshObservations.has(freshnessKey);
     // Fresh siblings cannot establish freshness for a different account. The
     // first pass already chooses the best observation of each exact identity.
-    if (!knownAccount && candidate.stale && hasEclipsingFreshObservation) continue;
-    // configuredProviders still keys off any fresh observation (including a
-    // same-device empty failure): a live notConfigured must be able to stand
-    // when the only configured reading is a stale sibling from another device.
+    if (!knownAccount && candidate.stale && hasFreshObservation) continue;
     const configuredProviders = hasFreshObservation
       ? providersWithFreshConfiguredAccounts
       : providersWithConfiguredAccounts;
@@ -849,7 +796,6 @@ module.exports = {
   DEFAULT_LIMITS_REFRESH_MS,
   aggregateLimits,
   isProviderStale,
-  isUsefulLimitObservation,
   mergeCodexTransientWindows,
   normalizeLimitProvider,
   normalizeLimitsSummary,

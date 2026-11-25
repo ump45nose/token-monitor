@@ -48,6 +48,14 @@ test('an unchanged CSV keeps the seeded client on every later launch', () => {
   assert.equal(seedAgentClients('claude,pi', { env }), 'claude,claude-desktop,pi,omp');
 });
 
+test('disabling the Claude Desktop split defers seeding claude-desktop until re-enabled', () => {
+  const { dir, env } = tempSharedDir();
+  assert.equal(seedAgentClients('claude,pi', { env, claudeDesktopSplitEnabled: false }), 'claude,pi,omp');
+  assert.deepEqual(JSON.parse(fs.readFileSync(markerPath(dir), 'utf8')).applied, ['omp']);
+  assert.equal(seedAgentClients('claude,pi', { env, claudeDesktopSplitEnabled: true }), 'claude,claude-desktop,pi,omp');
+  assert.deepEqual(JSON.parse(fs.readFileSync(markerPath(dir), 'utf8')).applied, ['omp', 'claude-desktop']);
+});
+
 // Editing the CSV is a new declaration and is taken literally. That is also the
 // operator's way to drop the split client: once the recorded source no longer
 // matches, the new CSV is seeded on its own terms — and the recorded migration

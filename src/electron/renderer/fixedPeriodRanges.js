@@ -3,11 +3,15 @@
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) root.TokenMonitorFixedPeriodRanges = api;
 })(typeof window !== 'undefined' ? window : null, function createFixedPeriodRangesApi() {
-  const MONTH_MODES = Object.freeze(['month', 'week', 'last7', 'last30', 'cycle']);
+  const MONTH_MODES = Object.freeze(['month', 'yesterday', 'week', 'last7', 'last30', 'cycle']);
+  const PERIOD_TAB_OPTIONS = Object.freeze(['today', 'yesterday', 'week', 'last7', 'month', 'last30', 'cycle', 'allTime']);
+  const MIN_PERIOD_TABS = 3;
+  const MAX_PERIOD_TABS = 6;
   const LABELS = Object.freeze({
     today: 'DAY',
     month: 'MONTH',
     allTime: 'TOTAL',
+    yesterday: 'YDAY',
     week: 'WEEK',
     last7: '7D',
     last30: '30D',
@@ -64,6 +68,7 @@
   }
 
   function normalizeCycleStartDay(value) {
+    if (typeof value !== 'number' && typeof value !== 'string') return 1;
     const day = Number(value);
     return Number.isInteger(day) && day >= 1 && day <= 31 ? day : 1;
   }
@@ -99,7 +104,7 @@
   }
 
   function isDerived(value) {
-    return value === 'week' || value === 'last7' || value === 'last30' || value === 'cycle';
+    return value === 'yesterday' || value === 'week' || value === 'last7' || value === 'last30' || value === 'cycle';
   }
 
   function slotForSelection(value) {
@@ -110,9 +115,20 @@
     return LABELS[value] || LABELS.today;
   }
 
+  function normalizePeriodTabOrder(value) {
+    if (!Array.isArray(value)) return [];
+    const order = [...new Set(value.filter(id => PERIOD_TAB_OPTIONS.includes(id)))];
+    // An empty order retains the legacy three-button layout and its range menu.
+    return order.length < MIN_PERIOD_TABS ? [] : order.slice(0, MAX_PERIOD_TABS);
+  }
+
   function rangeForSelection(selection, options = {}) {
     const todayKey = normalizeDateKey(options.todayKey) || localDayKey(options.now);
     if (!todayKey) return null;
+    if (selection === 'yesterday') {
+      const yesterday = dayKeyAddDays(todayKey, -1);
+      return { start: yesterday, end: yesterday };
+    }
     if (selection === 'week') {
       const weekday = new Date(`${todayKey}T00:00:00Z`).getUTCDay();
       const offset = (weekday - weekStartsOn(options.locale) + 7) % 7;
@@ -463,8 +479,13 @@
     return snapshot;
   }
 
-  function devicesForReadySnapshot(snapshot, selection, options = {}) {
+  function devicesForReadySnapshot(snapshot, selection, localDevice, options = {}) {
     const ready = readySnapshotForSelection(snapshot, selection, options);
+    // Native snapshots describe this machine alone. Build its row from the
+    // stats inventory even if History has no rows for the selected range.
+    if (ready?.native && localDevice) {
+      return [{ ...localDevice, periods: { ...localDevice.periods, [selection]: ready.period } }];
+    }
     return (ready?.devices || []).map((source) => ({
       ...source,
       periods: {
@@ -716,19 +737,55 @@
     };
   }
 
+  // Local mode publishes this machine's Yesterday / Week / Last 7 days / Last 30 days as
+  // scanned periods with sessions and projects (collector.js). Use one only
+  // for the range this calendar would draw: a locale or date the collector did
+  // not compose for falls back to the History-derived snapshot.
+  function nativeRangeSnapshot(selection, stats, options = {}) {
+    if (!isDerived(selection)) return null;
+    const window = stats?.nativeRangeWindows?.[selection];
+    const period = stats?.periods?.[selection];
+    if (!window || !period || typeof period !== 'object') return null;
+    const range = rangeForSelection(selection, options);
+    if (!range || range.start !== window.start || range.end !== window.end) return null;
+    return { status: 'ready', selection, reason: '', native: true, range, period };
+  }
+
+  // A native range keeps the History-derived Trends summary and device rows
+  // when History describes the same range; the local device shows the native
+  // period like the total does.
+  function nativeRangeWithHistory(native, history, localDeviceId) {
+    if (!native) return null;
+    if (history?.status !== 'ready' || history.selection !== native.selection
+      || history.range?.start !== native.range.start || history.range?.end !== native.range.end) {
+      return native;
+    }
+    return {
+      ...history,
+      native: true,
+      period: native.period,
+      devices: (history.devices || []).map((device) => (
+        localDeviceId && String(device?.deviceId || '') === String(localDeviceId) ? { ...device, period: native.period } : device
+      ))
+    };
+  }
+
   function fixedPeriodDeviceSnapshots(selection, sources, options = {}) {
     return fixedPeriodSnapshotFromDevices(selection, sources, options).devices || [];
   }
 
   function supportsBreakdown(selection, breakdown, options = {}) {
     if (!isDerived(selection)) return true;
-    if (breakdown === 'session' || breakdown === 'project') return false;
-    if (breakdown === 'device') return options.deviceHistoriesAvailable === true;
+    if (breakdown === 'session' || breakdown === 'project') return options.native === true;
+    if (breakdown === 'device') return options.deviceRowsAvailable === true;
     return true;
   }
 
   return {
     MONTH_MODES,
+    PERIOD_TAB_OPTIONS,
+    MIN_PERIOD_TABS,
+    MAX_PERIOD_TABS,
     createLatestRequestCoordinator,
     dailyForRange,
     dayKeyAddDays,
@@ -742,9 +799,12 @@
     isDerived,
     joinDeviceHistorySources,
     localDayKey,
+    nativeRangeSnapshot,
+    nativeRangeWithHistory,
     handlePeriodMenuNavigation,
     normalizeCycleStartDay,
     normalizeMonthMode,
+    normalizePeriodTabOrder,
     periodMenuTargetIndex,
     readySnapshotForSelection,
     rangeForSelection,

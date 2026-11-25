@@ -19,6 +19,7 @@ const {
 } = require('./clientSources');
 const { dirExists } = require('./clientSourceObservations');
 const { normalizeCustomScanPaths } = require('./customScanPaths');
+const { ANTIGRAVITY_ACP_SOURCE_ID, discoverAntigravityAcpPaths } = require('./providers/antigravity/acpPaths');
 const { activityWatchIgnored } = require('./sessionActivityWatch');
 const { antigravityDataRoots } = require('./providers/antigravity/selfSync');
 const { antigravityConversationSummaryCandidates } = require('./providers/antigravity/sessionMetadata');
@@ -96,7 +97,9 @@ function selfSyncSourceRootsForClients(clientsCsv, options = {}) {
 function antigravitySummaryWatchSources(options = {}) {
   return antigravityConversationSummaryCandidates({
     home: options.homeDir || os.homedir(),
-    env: options.env || process.env
+    env: options.env || process.env,
+    useEnvRoot: options.useEnvRoot !== false,
+    antigravityAcpPaths: options.antigravityAcpPaths
   }).map((candidate) => {
     const file = canonicalWatchFilePath(candidate);
     return { file, dir: path.dirname(file) };
@@ -104,6 +107,11 @@ function antigravitySummaryWatchSources(options = {}) {
 }
 
 function watchClientRootsForClients(clientsCsv, options = {}) {
+  const enabled = new Set(String(clientsCsv || '').split(',').map((value) => value.trim().toLowerCase()).filter(Boolean));
+  const acpDirs = enabled.has('antigravity')
+    ? options.antigravityAcpPaths ?? discoverAntigravityAcpPaths(options)
+    : [];
+  options = { ...options, antigravityAcpPaths: acpDirs };
   const rootsByClient = {};
   const customScanPaths = normalizeCustomScanPaths(options.customScanPaths, {
     platform: options.platform || process.platform
@@ -123,7 +131,6 @@ function watchClientRootsForClients(clientsCsv, options = {}) {
   // The Antigravity CLI writes parse-local SQLite that tokscale reads directly,
   // so it is also safe to watch and shares the umbrella client id. The filter
   // expands that id to antigravity-cli when the targeted scan runs.
-  const enabled = new Set(String(clientsCsv || '').split(',').map((value) => value.trim().toLowerCase()).filter(Boolean));
   const antigravityCliDir = antigravityCliDataDir(options);
   if (enabled.has('antigravity') && dirExists(antigravityCliDir)) {
     rootsByClient.antigravity = [...new Set([...(rootsByClient.antigravity || []), antigravityCliDir])];
@@ -132,8 +139,8 @@ function watchClientRootsForClients(clientsCsv, options = {}) {
     // Watch the parent so a summary DB or WAL created after startup is seen.
     // Its policy below admits only those exact files, never the surrounding tree.
     const summaryDirs = antigravitySummaryWatchSources(options).map(({ dir }) => dir).filter(dirExists);
-    if (summaryDirs.length > 0) {
-      rootsByClient.antigravity = [...new Set([...(rootsByClient.antigravity || []), ...summaryDirs])];
+    if (acpDirs.length > 0 || summaryDirs.length > 0) {
+      rootsByClient.antigravity = [...new Set([...(rootsByClient.antigravity || []), ...acpDirs, ...summaryDirs])];
     }
   }
   if (enabled.has('reasonix')) {
@@ -186,6 +193,7 @@ function watchAttributionRootsForClients(clientsCsv, watchRoots = null, options 
     const canonicalRoot = (dir) => path.resolve(canonicalWatchPath(dir));
     const usageRoots = new Set([
       ...antigravityDataRoots(options.homeDir || os.homedir()), antigravityCliDataDir(options),
+      ...(options.antigravityAcpPaths ?? discoverAntigravityAcpPaths(options)),
       ...(normalizeCustomScanPaths(options.customScanPaths, options).antigravity || [])
     ].map(canonicalRoot));
     const summaries = antigravitySummaryWatchSources(options);
@@ -469,8 +477,11 @@ function watchPolicyEntries(clientsCsv, options = {}) {
   if (candidates.copilot && exporter) bound('copilot', [exporter.dir], (_parts, resolved) => !exporter.matches(resolved));
 
   // Claude's parser and source fingerprint also read same-stem agent metadata.
-  bound('claude', sourceRoots('claude', 'claude-projects', 'claude-transcripts'),
-    recursiveSourceFiles((name) => name.endsWith('.jsonl') || name.endsWith('.meta.json')));
+  // Tracking `claude-desktop` without `claude` moves those roots onto it.
+  for (const claudeClient of ['claude', 'claude-desktop']) {
+    bound(claudeClient, sourceRoots(claudeClient, 'claude-projects', 'claude-transcripts'),
+      recursiveSourceFiles((name) => name.endsWith('.jsonl') || name.endsWith('.meta.json')));
+  }
   // Codex compresses a finished rollout to `.jsonl.zst` beside it. chokidar
   // holds a native watcher per discovered file, so an archive that can never
   // grow again keeps a descriptor for the rest of the session — 5.8k of them on
@@ -533,9 +544,11 @@ function watchPolicyEntries(clientsCsv, options = {}) {
   // Keep dynamic discovery ancestors, pruning dependency/VCS trees. Link
   // handling differs between discovery, scan roots and individual JSONL files.
   // IndexedDB roots and external blob trees are separate.
-  const desktopRoots = rootsByClient.claude || [];
-  bound('claude', desktopRoots.filter(({ id, dir }) => id === 'claude-desktop-transcripts' && dirExists(dir)).map(({ dir }) => dir),
-    ignoreDesktopTranscriptPath);
+  for (const claudeClient of ['claude', 'claude-desktop']) {
+    const desktopRoots = rootsByClient[claudeClient] || [];
+    bound(claudeClient, desktopRoots.filter(({ id, dir }) => id === 'claude-desktop-transcripts' && dirExists(dir)).map(({ dir }) => dir),
+      ignoreDesktopTranscriptPath);
+  }
 
   bound('openclaw', candidates.openclaw || [], (parts) => {
     // The first level is the dynamic agent id. Keep it so newly created agents
@@ -713,12 +726,15 @@ function watchPolicyEntries(clientsCsv, options = {}) {
   ]));
   const isCustomOnly = (client, root) => Boolean(customRoots.get(client)?.has(root))
     && !builtInBySource.get(client)?.has(root);
+  const acpDirs = new Set(rootsByClient.antigravity
+    ?.filter(root => root.id === ANTIGRAVITY_ACP_SOURCE_ID).map(root => root.dir));
   const recursive = [
     ...Object.entries(candidates)
       .flatMap(([client, dirs]) => dirs
         .filter((dir) => (
           (client !== 'copilot' || customRoots.get(client)?.has(canonicalRoot(dir)))
-          && (!SELF_SYNCED_CLIENTS.has(client) || customScanPaths[client]?.includes(dir))
+          && (!SELF_SYNCED_CLIENTS.has(client) || customScanPaths[client]?.includes(dir)
+            || (client === 'antigravity' && acpDirs.has(dir)))
           && !(claimed.get(client) || EMPTY_SET).has(dir)
         ))
         .map((dir) => ({ client, root: canonicalRoot(dir), custom: isCustomOnly(client, canonicalRoot(dir)) }))),
@@ -797,7 +813,7 @@ function watchIgnoreMatcher(clientsCsv, options = {}) {
 // entry point so the widget and the headless agent cannot drift apart.
 // Tri-state on purpose: unset must fall through to the caller's value, which
 // is why parseBoolean's fallback semantics don't fit. The default is native on
-// every platform — chokidar 4 has no per-platform backend left to differ on,
+// every platform, with a backend selected by the platform watcher,
 // and the failure cases it cannot cover are handled by the watch-descriptor
 // fallback below rather than by pre-emptively polling everywhere.
 //
@@ -901,7 +917,7 @@ function watchEntriesExceed(dirs, ignored, limit) {
 
 // chokidar reads CHOKIDAR_USEPOLLING after the options it is handed and lets it
 // win, so the polling mode it actually runs can differ from the one we asked
-// for. Parsed exactly as chokidar 4 parses it; undefined when unset.
+// for. Parsed as Chokidar parses it; undefined when unset.
 function chokidarPollingEnv(env = process.env) {
   const raw = env.CHOKIDAR_USEPOLLING;
   if (raw === undefined) return undefined;
@@ -927,6 +943,7 @@ function openWatch(chokidar, config = {}, onEvent) {
   const copilotExporter = copilotEnabled ? copilotExporterWatch(os.homedir()) : null;
   const ignored = activityWatchIgnored(watchIgnoreMatcher(config.clients, {
     customScanPaths: config.customScanPaths,
+    antigravityAcpPaths: config.antigravityAcpPaths,
     cursorDesktopRoots: config.cursorDesktopRoots,
     homeDir: config.homeDir,
     env: config.env,
@@ -955,7 +972,16 @@ function openWatch(chokidar, config = {}, onEvent) {
     error.code = WATCH_POLLING_LIMIT_CODE;
     throw error;
   }
-  const watcher = chokidar.watch(config.dirs, watcherOptions(usePolling, ignored));
+  // Chokidar 4 treats an empty override as unset. Chokidar 6 reads the
+  // environment synchronously and rejects the zero it gets from an empty string.
+  const emptyInterval = process.env.CHOKIDAR_INTERVAL === '';
+  if (emptyInterval) delete process.env.CHOKIDAR_INTERVAL;
+  let watcher;
+  try {
+    watcher = chokidar.watch(config.dirs, watcherOptions(usePolling, ignored));
+  } finally {
+    if (emptyInterval) process.env.CHOKIDAR_INTERVAL = '';
+  }
   if (onEvent) watcher.on('all', (event, filePath) => {
     // Reuse the matcher that saw initial discovery. Keep the reported path so
     // the collector can still apply every other client's own source policy.

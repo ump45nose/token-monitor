@@ -2,6 +2,7 @@
 
 const { applyArchivedClientUsage } = require('./clientUsageArchive');
 const {
+  applySessionDayArchive,
   applySessionUsageArchive,
   normalizeSessionUsageArchive,
   sessionUsageArchiveDate
@@ -95,19 +96,21 @@ function createUsageTransform(options = {}) {
       now,
       claudeDesktopSplitEnabled: settings.claudeDesktopSplitEnabled !== false
     };
-    const withArchivedClients = applyArchivedClientUsage(summary, settings.archivedClientUsage, {
+    // Past-day sessions are capture input only; no record carries them.
+    const { nativeRangeDays: _days, ...published } = summary;
+    const withArchivedClients = applyArchivedClientUsage(published, settings.archivedClientUsage, {
       activeClients: settings.clients,
       ...archiveOptions,
       shareSessions: true
     });
     const visibleSummary = settings.sessionUsageArchiveEnabled === false
       ? withArchivedClients
-      : applySessionUsageArchive(withArchivedClients, archive, {
+      : applySessionDayArchive(applySessionUsageArchive(withArchivedClients, archive, {
           ...archiveOptions,
           canonical: true,
           canonicalSummary: true,
           mutate: true
-        });
+        }), archive, { ...archiveOptions, canonical: true, activeClients: settings.clients });
     delete visibleSummary.sessionUsageArchiveFullScan;
     return settings.projectsEnabled === false ? visibleSummary : applyProjectRollups(visibleSummary);
   }

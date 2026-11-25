@@ -1,8 +1,9 @@
 'use strict';
 
-// Claude Desktop row split: which sessions Desktop started, and how tokscale
-// `claude` rows move onto `claude-desktop`. Fixtures are synthetic files in a
-// temp home; nothing here reads a real Claude directory or spawns tokscale.
+// Claude Desktop row split: userData root discovery, session classification,
+// collector split/watch/windowed handling, and archive folding when disabled.
+// Every fixture is synthetic and lives in a temp directory; nothing here reads
+// a real Claude directory or spawns tokscale.
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -10,6 +11,11 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
+const {
+  claudeDesktopUserDataCandidates,
+  claudeDesktopUserDataRoots,
+  variantForDir
+} = require('../../src/shared/providers/claude/desktopPaths');
 const {
   classifyEntrypoint,
   cliSessionIdFromRecord,
@@ -20,6 +26,7 @@ const {
 const {
   applyClaudeDesktopSplit,
   collectUsageOnce,
+  configFingerprint,
   expandDerivedTargets,
   localTodayKey,
   tokscaleClientFilter
@@ -32,6 +39,10 @@ const {
   seedSplitClients,
   splitClientIdFor
 } = require('../../src/shared/clientIdentitySplits');
+const {
+  applySessionDayArchive,
+  applySessionUsageArchive
+} = require('../../src/shared/usage/sessionUsageArchive');
 
 const ACCOUNT = '99999999-8888-4777-8666-555555555555';
 const ORG = '11111111-2222-4333-8444-555555555555';
@@ -40,8 +51,9 @@ function line(entrypoint, extra = {}) {
   return JSON.stringify({ type: 'user', sessionId: 'x', entrypoint, message: { role: 'user', content: 'hi' }, ...extra });
 }
 
-function fakeHome() {
+function fakeHome(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tm-claude-desktop-sessions-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const projects = path.join(home, '.claude', 'projects', '-Users-u-proj');
   fs.mkdirSync(projects, { recursive: true });
   const write = (id, text) => fs.writeFileSync(path.join(projects, `${id}.jsonl`), text);
@@ -67,6 +79,51 @@ function fakeHome() {
   return home;
 }
 
+test('desktopPaths candidates cover macOS, Windows (APPDATA, MSIX, Claude-Data) and Linux, for 1p and 3p', () => {
+  const mac = claudeDesktopUserDataCandidates({ platform: 'darwin', homeDir: '/Users/u', env: {} });
+  assert.deepEqual(mac.map(({ dir, variant }) => [dir, variant]), [
+    ['/Users/u/Library/Application Support/Claude', '1p'],
+    ['/Users/u/Library/Application Support/Claude-3p', '3p']
+  ]);
+
+  const win = claudeDesktopUserDataCandidates({
+    platform: 'win32',
+    homeDir: 'C:\\Users\\u',
+    env: { APPDATA: 'C:\\Users\\u\\AppData\\Roaming', LOCALAPPDATA: 'C:\\Users\\u\\AppData\\Local' }
+  }).map(({ dir }) => dir);
+  assert.ok(win.includes('C:\\Users\\u\\AppData\\Roaming\\Claude'));
+  assert.ok(win.includes('C:\\Users\\u\\AppData\\Roaming\\Claude-3p'));
+  assert.ok(win.some((dir) => /Packages\\Claude_pzs8sxrjxfjjc\\LocalCache\\Roaming\\Claude$/.test(dir)), 'MSIX root');
+  assert.ok(win.some((dir) => /Packages\\Claude_pzs8sxrjxfjjc\\LocalCache\\Roaming\\Claude-3p$/.test(dir)), 'MSIX 3p root');
+  assert.ok(win.includes('C:\\Users\\u\\AppData\\Local\\Claude-Data'));
+
+  const linux = claudeDesktopUserDataCandidates({ platform: 'linux', homeDir: '/home/u', env: { XDG_CONFIG_HOME: '/xdg' } });
+  assert.deepEqual(linux.map(({ dir }) => dir), ['/xdg/Claude', '/xdg/Claude-3p']);
+
+  const override = claudeDesktopUserDataCandidates({
+    platform: 'linux', homeDir: '/home/u', env: { TOKEN_MONITOR_CLAUDE_DESKTOP_DIR: '/a:/b-3p' }
+  });
+  assert.deepEqual(override.slice(0, 2).map(({ dir, variant }) => [dir, variant]), [['/a', '1p'], ['/b-3p', '3p']]);
+  assert.equal(variantForDir('/x/Claude-3p/'), '3p');
+  assert.equal(variantForDir('/x/Claude'), '1p');
+});
+
+test('desktopPaths keeps Windows separators when a macOS or Linux layout is simulated under a Windows home', () => {
+  const linux = claudeDesktopUserDataCandidates({ platform: 'linux', homeDir: 'C:\\Temp\\h', env: {} });
+  assert.deepEqual(linux.map(({ dir }) => dir), ['C:\\Temp\\h\\.config\\Claude', 'C:\\Temp\\h\\.config\\Claude-3p']);
+  const mac = claudeDesktopUserDataCandidates({ platform: 'darwin', homeDir: 'D:\\a\\home', env: {} });
+  assert.equal(mac[0].dir, 'D:\\a\\home\\Library\\Application Support\\Claude');
+  assert.equal(mac[1].variant, '3p');
+});
+
+test('claudeDesktopUserDataRoots returns only existing directories', (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tm-claude-desktop-paths-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(home, '.config', 'Claude'), { recursive: true });
+  const roots = claudeDesktopUserDataRoots({ platform: 'linux', homeDir: home, env: {} });
+  assert.deepEqual(roots.map(({ dir }) => dir), [path.join(home, '.config', 'Claude')]);
+});
+
 test('entrypoint values map to Desktop, Desktop third-party, or not Desktop', () => {
   assert.equal(classifyEntrypoint('claude-desktop'), 'desktop');
   assert.equal(classifyEntrypoint('local-agent'), 'desktop');
@@ -81,8 +138,8 @@ test('entrypoint values map to Desktop, Desktop third-party, or not Desktop', ()
   assert.equal(cliSessionIdFromRecord('garbage "cliSessionId": "abc-2"'), 'abc-2');
 });
 
-test('the index classifies by transcript entrypoint, Desktop records and Desktop roots', () => {
-  const home = fakeHome();
+test('the index classifies by transcript entrypoint, Desktop records and Desktop roots', (t) => {
+  const home = fakeHome(t);
   const index = createClaudeDesktopSessionIndex({ homeDir: home, env: {}, platform: 'linux' });
   assert.equal(index.classify('code-tab-session'), 'desktop');
   assert.equal(index.classify('cowork-session'), 'desktop');
@@ -96,8 +153,8 @@ test('the index classifies by transcript entrypoint, Desktop records and Desktop
   assert.equal(index.classify('../escape'), null);
 });
 
-test('the index notices sessions created after its first listing once the TTL passes', () => {
-  const home = fakeHome();
+test('the index notices sessions created after its first listing once the TTL passes', (t) => {
+  const home = fakeHome(t);
   let now = 0;
   const index = createClaudeDesktopSessionIndex({ homeDir: home, env: {}, platform: 'linux', ttlMs: 1000, now: () => now });
   assert.equal(index.classify('late-session'), null);
@@ -109,8 +166,8 @@ test('the index notices sessions created after its first listing once the TTL pa
   assert.equal(index.classify('late-session'), 'desktop');
 });
 
-test('a transcript whose first line is still being written is re-read later', () => {
-  const home = fakeHome();
+test('a transcript whose first line is still being written is re-read later', (t) => {
+  const home = fakeHome(t);
   const file = path.join(home, '.claude', 'projects', '-Users-u-proj', 'growing.jsonl');
   fs.writeFileSync(file, '{"type":"user","sess');
   const index = createClaudeDesktopSessionIndex({ homeDir: home, env: {}, platform: 'linux', ttlMs: 0 });
@@ -202,6 +259,20 @@ test('a full scan reports Desktop sessions under claude-desktop and the rest und
   assert.ok(scans.every((clients) => clients === 'claude,claude-desktop'));
 });
 
+test('a windowed full scan splits today, month, allTime and native-range days', async () => {
+  const summary = await collectUsageOnce({
+    ...baseOptions,
+    clients: 'claude,claude-desktop',
+    nativeRangesEnabled: true,
+    runTokscaleWindows: async ({ windows }) => Object.fromEntries(windows.map(({ name }) => [name, tokscaleRows()]))
+  });
+  assert.deepEqual(summary.today.clients, { 'claude-desktop': 100, claude: 7 });
+  assert.deepEqual(summary.month.clients, { 'claude-desktop': 100, claude: 7 });
+  assert.deepEqual(summary.allTime.clients, { 'claude-desktop': 100, claude: 7 });
+  assert.equal(summary.nativeRanges.yesterday.clients['claude-desktop'], 100);
+  assert.equal(summary.nativeRanges.yesterday.clients.claude, 7);
+});
+
 test('tracking only claude-desktop leaves Claude Code usage out', async () => {
   const summary = await collectUsageOnce({
     ...baseOptions,
@@ -252,7 +323,7 @@ test('the claude/claude-desktop identity split has its own generation', () => {
   assert.equal(seedSplitClients('claude,codex', { applied: ['omp', 'claude-desktop'] }).clients, 'claude,codex', 'seeded once');
 });
 
-test('disabling the Desktop split leaves tokscale rows under claude', () => {
+test('disabling the Desktop split leaves tokscale rows under claude and changes the anchor fingerprint', () => {
   const index = { classify: (id) => (id === 'd1' ? 'desktop' : null) };
   const rows = () => ({ entries: [{ client: 'claude', sessionId: 'd1' }, { client: 'claude', sessionId: 'c1' }] });
   const both = rows();
@@ -267,6 +338,10 @@ test('disabling the Desktop split leaves tokscale rows under claude', () => {
     claudeDesktopSplitEnabled: false
   });
   assert.deepEqual(desktopOnly.entries, [], 'desktop-only tracking with the split off keeps no Claude Code rows');
+
+  const fpOn = configFingerprint('claude,claude-desktop', '2025-01-01', true, null, 'fixed', { claudeDesktopSplitEnabled: true });
+  const fpOff = configFingerprint('claude,claude-desktop', '2025-01-01', true, null, 'fixed', { claudeDesktopSplitEnabled: false });
+  assert.notEqual(fpOn, fpOff, 'toggling split invalidates persisted anchors');
 });
 
 test('seedSplitClients skips claude-desktop while the split is disabled', () => {
@@ -277,4 +352,53 @@ test('seedSplitClients skips claude-desktop while the split is disabled', () => 
   const on = seedSplitClients('claude,codex', { applied: ['omp'], claudeDesktopSplitEnabled: true });
   assert.equal(on.clients, 'claude,claude-desktop,codex');
   assert.deepEqual(on.seeded, ['claude-desktop']);
+});
+
+test('session archives fold archived claude-desktop rows onto claude when the split is disabled', () => {
+  const now = new Date('2026-10-19T12:00:00.000Z');
+  const day = localTodayKey(now);
+  const yesterday = '2026-10-18';
+  const archivedRow = {
+    client: 'claude-desktop',
+    sessionId: 'd1',
+    model: 'claude-opus-4-8',
+    totalTokens: 100,
+    costUsd: 1,
+    models: { 'claude-opus-4-8': 100 },
+    modelCosts: { 'claude-opus-4-8': 1 }
+  };
+  const archive = {
+    version: 1,
+    sessions: {
+      'claude-desktop:d1': {
+        client: 'claude-desktop',
+        sessionId: 'd1',
+        capturedAt: now.toISOString(),
+        day,
+        month: day.slice(0, 7),
+        periods: { today: archivedRow, month: archivedRow, allTime: archivedRow },
+        days: { [yesterday]: { capturedAt: '2026-10-18T18:00:00.000Z', session: archivedRow } }
+      }
+    }
+  };
+  const emptySummary = {
+    today: emptyPeriod(),
+    month: emptyPeriod(),
+    allTime: emptyPeriod(),
+    nativeRanges: { yesterday: emptyPeriod() },
+    nativeRangeWindows: { yesterday: { start: yesterday, end: yesterday } }
+  };
+  const foldedPeriods = applySessionUsageArchive(emptySummary, archive, { now, claudeDesktopSplitEnabled: false });
+  assert.equal(foldedPeriods.today.clients.claude, 100);
+  assert.equal(foldedPeriods.today.clients['claude-desktop'], undefined);
+  assert.ok(foldedPeriods.today.sessions['claude:d1']);
+
+  const foldedRanges = applySessionDayArchive(emptySummary, archive, {
+    now,
+    activeClients: 'claude',
+    claudeDesktopSplitEnabled: false
+  });
+  assert.equal(foldedRanges.nativeRanges.yesterday.clients.claude, 100);
+  assert.equal(foldedRanges.nativeRanges.yesterday.clients['claude-desktop'], undefined);
+  assert.ok(foldedRanges.nativeRanges.yesterday.sessions['claude:d1']);
 });

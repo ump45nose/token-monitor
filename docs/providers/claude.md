@@ -4,8 +4,8 @@ ids: [claude, claude-desktop]
 read_when:
   - Changing Claude session roots, titles, turn state or live context parsing
   - Changing retained Claude Desktop discovery or transcript watch policies
+  - Changing the Claude Desktop row split
   - Changing Claude OAuth, Web session or CLI limits collection
-  - Changing the Claude Desktop row split or the Desktop local-only limits mode
   - Changing Claude account identity, prepaid credits or cookie renewal
 ---
 
@@ -59,9 +59,9 @@ Windows native mode still admits file links and observes link removal and suppor
 
 `claude-desktop` is a derived client (`derivedFrom: 'claude'` in `clientCatalog.js`). tokscale never emits it: the collector scans `claude` and, when the scan asked for `claude-desktop`, `src/shared/providers/claude/desktopSessions.js` moves the rows of Desktop-started sessions onto it — both `entries` and `sessions`, so `${client}:${sessionId}` metadata keeps pairing up. It answers the question a model name cannot: with several Claude channels (API keys, gateways, the subscription) the same models appear everywhere, while Desktop sessions are the ones billed against the claude.ai plan.
 
-`claudeDesktopSplitEnabled` (Settings → AI Tool Limits → Claude, or `TOKEN_MONITOR_CLAUDE_DESKTOP_SPLIT`, default on) turns the split off to match upstream: Desktop transcripts stay under `claude`, archives fold `claude-desktop` back onto `claude` so toggling cannot double-count, and `claude-desktop` is not auto-seeded while the setting is off.
+`claudeDesktopSplitEnabled` (Settings → Collection → Claude Code / Claude Desktop, or `TOKEN_MONITOR_CLAUDE_DESKTOP_SPLIT`, default on) turns the split off to keep all sessions combined: Desktop transcripts stay under `claude`, archives fold `claude-desktop` back onto `claude` so toggling cannot double-count, and `claude-desktop` is not auto-seeded while the setting is off.
 
-A session is Desktop when any local signal says so: its transcript head records `"entrypoint":"claude-desktop"` (Code tab) or `"local-agent"` (Cowork); a Desktop `claude-code-sessions/**/local_*.json` record names it as `cliSessionId`; or its transcript lives under a Desktop root's `local-agent-mode-sessions/**/.claude/projects`. Reads are node:fs only and bounded (64 KiB transcript heads, 1 MiB records, capped walks); per-transcript answers and listings are cached across ticks.
+A session is Desktop when any local signal says so: its transcript head records `"entrypoint":"claude-desktop"` (Code tab) or `"local-agent"` (Cowork); a Desktop `claude-code-sessions/**/local_*.json` record names it as `cliSessionId`; or its transcript lives under a Desktop root's `local-agent-mode-sessions/**/.claude/projects`. UserData roots are discovered read-only by `src/shared/providers/claude/desktopPaths.js` across macOS, Windows (Squirrel, MSIX and `Claude-Data`), Linux, `CLAUDE_USER_DATA_DIR`, and `TOKEN_MONITOR_CLAUDE_DESKTOP_DIR`. Reads are `node:fs` only and bounded (64 KiB transcript heads, 1 MiB records, capped walks); per-transcript answers and listings are cached across ticks.
 
 The third-party-inference build (`entrypoint: "claude-desktop-3p"`, the `Claude-3p` userData root) is classified separately and stays under `claude`: it is not billed against the claude.ai subscription, so the Desktop row remains a clean proxy for the official 5h/7d quota.
 
@@ -81,15 +81,6 @@ The [shared activity pipeline](../architecture.md) owns refresh, patches and thi
 
 ## Limits source order
 
-### Claude Desktop local-only mode
-
-`claudeDesktopLocalOnly` (Settings → AI Tool Limits → Claude, or `TOKEN_MONITOR_CLAUDE_DESKTOP_LOCAL_ONLY=1`, which also forces it on) short-circuits `fetchClaudeLimits()` before any other lane: none of the Web, OAuth or CLI paths below run — no claude.ai or api.anthropic.com request, no credential read, no `claude` subprocess — and the form's organization discovery is refused. The row is built by `src/shared/providers/claude/desktopPlanUsage.js` from Claude Desktop's own `plan-usage-history.json` (`{version, samples:[{t, org, u:{fh, sd}}]}`; `fh` is the 5-hour and `sd` the 7-day percentage) in each userData root: `Claude` and `Claude-3p` under the platform's app-data directory, Windows MSIX `Packages/<family>/LocalCache/Roaming`, `TOKEN_MONITOR_CLAUDE_DESKTOP_DIR` (path list) and `CLAUDE_USER_DATA_DIR`.
-
-Parsing is tolerant: BOM, empty files, unknown versions (warned), missing fields, future timestamps and a half-written file (complete samples are salvaged from a truncated `samples` array) do not fail the row. First-party roots win; a `-3p` root is used only when nothing else exists and is marked. `claudeDesktopOrgId` / `TOKEN_MONITOR_CLAUDE_DESKTOP_ORG_ID` selects an organization (full UUID or 8-hex prefix); otherwise the newest sample's organization is used. Reset times are estimates from the sample history (the last weekly drop + 7 days, a 5-hour run start + 5 hours) and are omitted when the history does not show one. The account key matches the OAuth/Web lanes when the Desktop session directories name the account. Samples only advance while Claude Desktop runs.
-
-### Networked lanes
-
-`fetchClaudeLimits()` otherwise uses these mutually exclusive paths:
 `fetchClaudeAccountsLimits()` collects each saved Web account alongside the automatically detected OAuth/CLI account. Accounts are probed independently; a failed Web session cannot suppress another account. Each Web account has its own organization selection and cached display identity. Account-scoped refreshes publish only the requested identity. Removing or disabling a Web credential reconciles the stable identity through its remaining Web, legacy and OAuth/CLI sources; only a confirmed missing identity is retired. Before identity resolution, clear only that managed ID's provisional row, then reconcile the provider without clearing its other identities. Transient failures retain last-good data through the limits runtime.
 
 The single-credential `fetchClaudeLimits()` remains the form validator and uses these mutually exclusive paths:

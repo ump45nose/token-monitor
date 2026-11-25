@@ -31,6 +31,7 @@ const {
 
 const { emptyPeriod } = require('../../src/shared/usage');
 const { installInProcessWatchHost } = require('../helpers/watchHost');
+const { withoutWindowedScan } = require('../helpers/tokscaleWithoutWindows');
 
 installInProcessWatchHost(test);
 
@@ -364,7 +365,6 @@ test('full anchors persist local-only Reasonix native views alongside aggregate 
     await waitForCondition(() => updates.length === 1);
     const saved = JSON.parse(fs.readFileSync(path.join(tmpShared, 'collector-anchor.json'), 'utf8'));
     assert.equal(saved.cursorAutoModelVersion, 1);
-    assert.equal(saved.qoderCnModelVersion, 2);
     assert.deepEqual(saved.nativeSessions, nativeView.sessions);
     assert.deepEqual(saved.nativeProjects, nativeView.projects);
   } finally {
@@ -404,7 +404,7 @@ test('restart reuse: anchor file on disk enables todayOnly on first interval tic
   const childProcess = require('node:child_process');
   const originalSpawn = childProcess.spawn;
   const calls = [];
-  childProcess.spawn = () => {
+  childProcess.spawn = withoutWindowedScan(() => {
     calls.push('spawn');
     const { EventEmitter } = require('node:events');
     const child = new EventEmitter();
@@ -417,7 +417,7 @@ test('restart reuse: anchor file on disk enables todayOnly on first interval tic
       child.emit('close', 0);
     });
     return child;
-  };
+  });
 
   const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
   process.env.TOKEN_MONITOR_SHARED_DIR = tmpShared;
@@ -465,7 +465,7 @@ test('future fullScanAt forces a full scan on first interval tick', async () => 
   const childProcess = require('node:child_process');
   const originalSpawn = childProcess.spawn;
   const calls = [];
-  childProcess.spawn = () => {
+  childProcess.spawn = withoutWindowedScan(() => {
     calls.push('spawn');
     const { EventEmitter } = require('node:events');
     const child = new EventEmitter();
@@ -478,7 +478,7 @@ test('future fullScanAt forces a full scan on first interval tick', async () => 
       child.emit('close', 0);
     });
     return child;
-  };
+  });
 
   const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
   process.env.TOKEN_MONITOR_SHARED_DIR = tmpShared;
@@ -526,7 +526,7 @@ test('missing fullScanAt forces a full scan on first interval tick', async () =>
   const childProcess = require('node:child_process');
   const originalSpawn = childProcess.spawn;
   const calls = [];
-  childProcess.spawn = () => {
+  childProcess.spawn = withoutWindowedScan(() => {
     calls.push('spawn');
     const { EventEmitter } = require('node:events');
     const child = new EventEmitter();
@@ -539,7 +539,7 @@ test('missing fullScanAt forces a full scan on first interval tick', async () =>
       child.emit('close', 0);
     });
     return child;
-  };
+  });
 
   const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
   process.env.TOKEN_MONITOR_SHARED_DIR = tmpShared;
@@ -588,7 +588,7 @@ test('unparseable fullScanAt forces a full scan on first interval tick', async (
   const childProcess = require('node:child_process');
   const originalSpawn = childProcess.spawn;
   const calls = [];
-  childProcess.spawn = () => {
+  childProcess.spawn = withoutWindowedScan(() => {
     calls.push('spawn');
     const { EventEmitter } = require('node:events');
     const child = new EventEmitter();
@@ -601,7 +601,7 @@ test('unparseable fullScanAt forces a full scan on first interval tick', async (
       child.emit('close', 0);
     });
     return child;
-  };
+  });
 
   const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
   process.env.TOKEN_MONITOR_SHARED_DIR = tmpShared;
@@ -654,7 +654,7 @@ test('WSL toggle off: persisted wslAnchor is not merged into warm previews', asy
   // bundle leaks into a preview it shows totalTokens 999 instead of 0.
   const childProcess = require('node:child_process');
   const originalSpawn = childProcess.spawn;
-  childProcess.spawn = () => {
+  childProcess.spawn = withoutWindowedScan(() => {
     const { EventEmitter } = require('node:events');
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
@@ -666,7 +666,7 @@ test('WSL toggle off: persisted wslAnchor is not merged into warm previews', asy
       child.emit('close', 0);
     });
     return child;
-  };
+  });
 
   const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
   process.env.TOKEN_MONITOR_SHARED_DIR = tmpShared;
@@ -706,7 +706,7 @@ test('cross-day anchor invalidation: stale dateKey triggers full scan', async ()
   const childProcess = require('node:child_process');
   const originalSpawn = childProcess.spawn;
   const calls = [];
-  childProcess.spawn = () => {
+  childProcess.spawn = withoutWindowedScan(() => {
     calls.push('spawn');
     const { EventEmitter } = require('node:events');
     const child = new EventEmitter();
@@ -719,7 +719,7 @@ test('cross-day anchor invalidation: stale dateKey triggers full scan', async ()
       child.emit('close', 0);
     });
     return child;
-  };
+  });
 
   try {
     const { collectUsageOnce } = freshCollector();
@@ -804,24 +804,6 @@ test('Cursor anchors from before the Auto model rename require a full scan', () 
   };
   assert.equal(collectorAnchorTrust(anchor, options), null);
   assert.equal(collectorAnchorTrust({ ...anchor, cursorAutoModelVersion: 1 }, options).capturedAtMs, now.getTime() - 60_000);
-});
-
-test('Qoder CN anchors from before the app-side model mapping require a full scan', () => {
-  const { collectorAnchorTrust, configFingerprint } = freshCollector();
-  const now = new Date(2026, 7, 8, 10, 0, 0);
-  const options = { clients: 'qodercn', allTimeSince: '2024-01-01', now };
-  const anchor = {
-    dateKey: '2026-08-08', today: {}, month: {}, allTime: {},
-    calendarKey: collectionCalendarKey(now),
-    configFingerprint: configFingerprint('qodercn', '2024-01-01'),
-    fullScanAt: new Date(now.getTime() - 60_000).toISOString()
-  };
-  assert.equal(collectorAnchorTrust(anchor, options), null);
-  assert.equal(collectorAnchorTrust({ ...anchor, qoderCnModelVersion: 1 }, options), null);
-  assert.equal(collectorAnchorTrust({ ...anchor, qoderCnModelVersion: 2 }, options).capturedAtMs, now.getTime() - 60_000);
-  // Other clients do not need the Qoder CN stamp.
-  const codex = { ...anchor, configFingerprint: configFingerprint('codex', '2024-01-01') };
-  assert.equal(collectorAnchorTrust(codex, { ...options, clients: 'codex' }).capturedAtMs, now.getTime() - 60_000);
 });
 
 test('flat catalog project provenance requires a full scan instead of guessing period sources', () => {

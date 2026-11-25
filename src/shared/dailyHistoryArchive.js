@@ -15,24 +15,17 @@ const {
 const ARCHIVE_VERSION = 1;
 const DAY_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-function normalizeArchiveModelName(value, client) {
-  const model = normalizeTokscaleModelNameForClient(value, client);
-  // Live usage lowercases model ids. Apply the same identity to native graph
-  // labels and old persisted Qoder rows, including their component summaries.
-  return normalizeTokscaleClientName(client) === 'qodercn' ? model.toLowerCase() : model;
-}
-
 function observationKey(value) {
   return JSON.stringify([
     normalizeTokscaleClientName(value?.client) || 'unknown',
-    normalizeArchiveModelName(value?.modelId || value?.model || value?.model_id || 'unknown', value?.client)
+    normalizeTokscaleModelNameForClient(value?.modelId || value?.model || value?.model_id || 'unknown', value?.client)
   ]);
 }
 
 function normalizeObservation(value) {
   if (!value || typeof value !== 'object') return null;
   const client = normalizeTokscaleClientName(value.client) || 'unknown';
-  const modelId = normalizeArchiveModelName(value.modelId || value.model || value.model_id || 'unknown', client);
+  const modelId = normalizeTokscaleModelNameForClient(value.modelId || value.model || value.model_id || 'unknown', client);
   const tokens = Math.max(0, Math.round(num(value.tokens)));
   const cost = Math.max(0, num(value.cost));
   const messages = Math.max(0, Math.round(num(value.messages)));
@@ -70,7 +63,6 @@ function normalizeObservation(value) {
     tokens,
     cost,
     messages,
-    ...(value.creditMessagesIncomplete === true ? { creditMessagesIncomplete: true } : {}),
     ...(typeof value.pricingRevision === 'string' ? { pricingRevision: value.pricingRevision } : {}),
     ...(unclassifiedTokens > 0 ? { unclassifiedTokens } : {}),
     ...(tokenComponentsAvailable ? {
@@ -91,8 +83,6 @@ function addObservation(previous, candidate) {
     tokens: previous.tokens + candidate.tokens,
     cost: previous.cost + candidate.cost,
     messages: previous.messages + candidate.messages,
-    ...(previous.creditMessagesIncomplete === true || candidate.creditMessagesIncomplete === true
-      ? { creditMessagesIncomplete: true } : {}),
     reasoningTokens: num(previous.reasoningTokens) + num(candidate.reasoningTokens),
     tokenComponentsAvailable: previous.tokenComponentsAvailable === true
       && candidate.tokenComponentsAvailable === true,
@@ -197,9 +187,9 @@ function normalizeDay(value, fallbackDate = '') {
   // An array is one scan's rows: two rows for the same model are separate
   // sessions and add up. A keyed object is a stored day, which already holds one
   // snapshot per model. Two of its keys meet only when an older build stored the
-  // same model under another spelling (a raw Qoder CN code beside its display
-  // name, a case split, Cursor `auto` beside `cursor-auto`). Those are the same
-  // usage seen twice, so keep the larger snapshot instead of summing them.
+  // same model under another spelling (Cursor `auto`/`default` beside
+  // `cursor-auto`, or an aliased or differently cased client id). Those are the
+  // same usage seen twice, so keep the larger snapshot instead of summing them.
   const scanRows = Array.isArray(value?.observations);
   const source = scanRows
     ? value.observations
@@ -220,7 +210,7 @@ function normalizeDay(value, fallbackDate = '') {
   // The stored summary counted both spellings, so it no longer fits the
   // deduplicated rows; each row still carries its own components.
   const componentSummary = aliasCollapsed ? null : normalizeComponentSummary(
-    normalizeTokscaleModelComponentSummary(value?.componentSummary, source, normalizeArchiveModelName), observations
+    normalizeTokscaleModelComponentSummary(value?.componentSummary, source), observations
   );
   return {
     date,
@@ -357,7 +347,6 @@ function observationsFromGraphs(graphs, options = {}) {
 
 function shouldReplaceObservation(previous, incoming) {
   if (!previous) return true;
-  if (isPartialCreditObservation(incoming, previous)) return false;
   if (incoming.tokens !== previous.tokens) return incoming.tokens > previous.tokens;
   if (incoming.messages !== previous.messages) return incoming.messages > previous.messages;
   // Equal usage can legitimately receive corrected pricing or richer metadata.
@@ -433,8 +422,8 @@ function captureDailyHistoryArchive(existingArchive, graphs, options = {}) {
     // owns its price (including explicit zero). Keep archive-only usage and
     // richer live metadata, but do not let an older live cost undo repricing.
     const liveDay = archive.liveDays?.[date];
-    if (liveDay) {
-      archive.liveDays[date] = withReconciledGraphCosts(liveDay, incoming, liveDay, reprice, options.pricingRevision, true);
+    if (liveDay && (reprice || typeof options.pricingRevision === 'string')) {
+      archive.liveDays[date] = withReconciledGraphCosts(liveDay, incoming, liveDay, reprice, options.pricingRevision);
     }
   }
 
@@ -452,13 +441,13 @@ function captureDailyHistoryArchive(existingArchive, graphs, options = {}) {
 function periodLiveDay(period, date) {
   if (!period || typeof period !== 'object' || !DAY_KEY_RE.test(date)) return null;
   const observations = new Map();
-  const addObservation = (client, modelId, tokens, cost, messages = 0) => {
+  const addObservation = (client, modelId, tokens, cost) => {
     const observation = {
       client,
       modelId,
       tokens: Math.max(0, Math.round(num(tokens))),
       cost: Math.max(0, num(cost)),
-      messages
+      messages: 0
     };
     const key = observationKey(observation);
     const previous = observations.get(key);
@@ -468,7 +457,6 @@ function periodLiveDay(period, date) {
     }
     previous.tokens += observation.tokens;
     previous.cost += observation.cost;
-    previous.messages = Math.max(previous.messages, observation.messages);
   };
   const clientModels = period.clientModels && typeof period.clientModels === 'object'
     ? period.clientModels
@@ -478,16 +466,13 @@ function periodLiveDay(period, date) {
     : {};
   const clients = period.clients && typeof period.clients === 'object' ? period.clients : {};
   const clientCosts = period.clientCosts && typeof period.clientCosts === 'object' ? period.clientCosts : {};
-  const clientIds = new Set([
-    ...Object.keys(clientModels), ...Object.keys(clientModelCosts),
-    ...Object.keys(clients), ...Object.keys(clientCosts)
-  ]);
+  const clientIds = new Set([...Object.keys(clientModels), ...Object.keys(clients), ...Object.keys(clientCosts)]);
 
   for (const client of clientIds) {
     const models = clientModels[client] && typeof clientModels[client] === 'object'
       ? clientModels[client]
       : {};
-    const modelIds = [...new Set([...Object.keys(models), ...Object.keys(clientModelCosts[client] || {})])];
+    const modelIds = Object.keys(models);
     let modeledTokens = 0;
     let modeledCost = 0;
     for (const modelId of modelIds) {
@@ -504,27 +489,6 @@ function periodLiveDay(period, date) {
     if (modelIds.length === 0 || remainderTokens > 0 || remainderCost > 0) {
       addObservation(client, 'unknown', remainderTokens, remainderCost);
     }
-  }
-
-  // Single-model sessions provide an exact request count for that model.
-  // Multi-model sessions only prove a lower bound for an explicit zero price;
-  // never assign the whole session count to each of its models.
-  const creditMessages = new Map();
-  const incompleteCreditModels = new Set();
-  for (const session of Object.values(period.sessions || {})) {
-    if (normalizeTokscaleClientName(session?.client) !== 'qodercn' || num(session.messageCount) <= 0) continue;
-    const modelIds = new Set([...Object.keys(session.models || {}), ...Object.keys(session.modelCosts || {})]);
-    for (const modelId of modelIds) {
-      const cost = session.modelCosts?.[modelId];
-      if (modelIds.size > 1) incompleteCreditModels.add(modelId);
-      const count = modelIds.size === 1 ? num(session.messageCount) : cost === 0 ? 1 : 0;
-      if (count > 0) creditMessages.set(modelId, (creditMessages.get(modelId) || 0) + count);
-    }
-  }
-  for (const [modelId, messages] of creditMessages) addObservation('qodercn', modelId, 0, 0, messages);
-  for (const modelId of incompleteCreditModels) {
-    const observation = observations.get(observationKey({ client: 'qodercn', modelId }));
-    if (observation) observation.creditMessagesIncomplete = true;
   }
 
   const totalTokens = Math.max(0, Math.round(num(period.totalTokens)));
@@ -606,63 +570,31 @@ function liveDayIsGreater(incoming, previous) {
   return dayCost(incoming) !== dayCost(previous);
 }
 
-function isPartialCreditObservation(incoming, previous) {
-  if (incoming?.client !== 'qodercn' || !previous) return false;
-  if (num(incoming.tokens) < num(previous.tokens)) return true;
-  // Multi-model live counts are unknown, not zero. Accept nondecreasing
-  // tokens and cost, but leave downward price corrections to complete data.
-  if (incoming.creditMessagesIncomplete === true) return num(incoming.cost) < num(previous.cost);
-  return num(incoming.messages) < num(previous.messages);
-}
-
 // A changed pricing revision makes matching graph usage authoritative, even
 // when its new cost is zero. Otherwise preserve live prices, with Cursor's
 // existing positive-graph-price preference and live fallback for missing cost.
-function withReconciledGraphCosts(day, graphDay, liveDay, reprice = false, pricingRevision, sourceRefresh = false) {
+function withReconciledGraphCosts(day, graphDay, liveDay, reprice = false, pricingRevision) {
   let changed = false;
   const observations = Object.fromEntries(Object.entries(day.observations).map(([key, observation]) => {
     const graphObservation = graphDay.observations[key];
     const liveObservation = liveDay.observations[key];
     const revisionChanged = typeof pricingRevision === 'string'
       && liveObservation?.pricingRevision !== pricingRevision;
-    // A Qoder observation can change price without changing tokens
-    // or FX. A fresh source graph owns that correction; between graph scans,
-    // a known live observation owns it even beside larger archive-only usage.
-    const qoderCredits = normalizeTokscaleClientName(observation.client) === 'qodercn'
-      && graphObservation && liveObservation
-      && num(graphObservation.messages) > 0
-      && (num(liveObservation.messages) > 0 || num(liveObservation.cost) > 0);
-    // Without a pricing revision, source capture previously left other
-    // clients' retained live prices untouched. Keep that boundary.
-    if (sourceRefresh && !reprice && typeof pricingRevision !== 'string' && !qoderCredits) {
-      return [key, observation];
-    }
-    const useGraphPrice = reprice || revisionChanged || (sourceRefresh && qoderCredits);
-    // A fresh graph supplies the per-model counts a multi-model live report
-    // lacks. Confirm them together with its price, without lowering coverage.
-    const confirmsCounts = sourceRefresh && qoderCredits
-      && liveObservation.creditMessagesIncomplete === true
-      && !isPartialCreditObservation(graphObservation, liveObservation);
+    const useGraphPrice = reprice || revisionChanged;
     const isCursor = normalizeTokscaleClientName(observation.client) === 'cursor';
-    if ((!useGraphPrice && typeof pricingRevision !== 'string' && !isCursor && !qoderCredits)
+    if ((!useGraphPrice && typeof pricingRevision !== 'string' && !isCursor)
       || !graphObservation
       || !liveObservation
-      || num(graphObservation.tokens) !== num(liveObservation.tokens)
-      // Equal tokens cannot prove equal usage when some requests are masked.
-      // A partial request set must not reprice a more complete retained row.
-      || (observation.client === 'qodercn' && !confirmsCounts && (num(graphObservation.messages) !== num(liveObservation.messages)
-        || num(graphObservation.messages) !== num(observation.messages)
-        || (!useGraphPrice && liveObservation.creditMessagesIncomplete === true)))) {
+      || num(graphObservation.tokens) !== num(liveObservation.tokens)) {
       return [key, observation];
     }
     const cost = useGraphPrice || (isCursor && num(graphObservation.cost) > 0)
       ? graphObservation.cost : liveObservation.cost;
-    if (!confirmsCounts && num(cost) === num(observation.cost)
+    if (num(cost) === num(observation.cost)
       && (typeof pricingRevision !== 'string' || observation.pricingRevision === pricingRevision)) return [key, observation];
     changed = true;
     return [key, {
       ...observation, cost,
-      ...(confirmsCounts ? { messages: graphObservation.messages, creditMessagesIncomplete: false } : {}),
       ...(typeof pricingRevision === 'string' ? { pricingRevision } : {})
     }];
   }));
@@ -674,7 +606,6 @@ function mergeLiveDayMetadata(liveDay, previousDay) {
   const observations = Object.fromEntries(Object.entries(liveDay.observations).map(([key, observation]) => {
     const previous = previousDay.observations[key];
     if (!previous) return [key, observation];
-    if (isPartialCreditObservation(observation, previous)) return [key, previous];
     if (liveDay.componentSummary) {
       return [key, {
         ...observation,
@@ -726,28 +657,8 @@ function captureLiveDay(previous, period, options = {}) {
       observation.pricingRevision = options.pricingRevision;
     }
   }
-  return selectLiveDay(previous, incoming, options.sourceDay, options);
-}
-
-// Pick the day to store for one date. `sourceDay` is the persisted graph day for
-// that date, when the caller has an archive; the pure live-tick path omits it.
-function selectLiveDay(previous, incoming, sourceDay, options = {}) {
-  // Keep complete credit observations before whole-day selection, including
-  // absent models: a missing source supplies no zero-price correction.
-  // Live prices win ties, while unrelated clients can still grow.
-  for (const retainedDay of [previous, sourceDay]) {
-    for (const [key, retained] of Object.entries(retainedDay?.observations || {})) {
-      const observation = incoming.observations[key];
-      if ((!observation && retained.client === 'qodercn')
-        || isPartialCreditObservation(observation, retained)) {
-        incoming.observations[key] = retained;
-        // The source summary describes the partial token totals, not the
-        // retained observation. Fall back to each row's known components.
-        if (num(observation?.tokens) !== retained.tokens) delete incoming.componentSummary;
-      }
-    }
-  }
-  const equalUsage = previous && dayTokens(incoming) === dayTokens(previous);
+  if (!previous) return incoming;
+  const equalUsage = dayTokens(incoming) === dayTokens(previous);
   // Revision provenance comes from the retained rows, not a missing model key.
   // Equal totals can also be reattributed by a parser correction independently
   // of pricing. Keep the incoming identities and merge only matching metadata.
@@ -761,34 +672,18 @@ function selectLiveDay(previous, incoming, sourceDay, options = {}) {
       observation.tokens !== previous.observations[key]?.tokens
     ))
   );
-  if (!previous || liveDayIsGreater(incoming, previous) || revisionChanged || attributionChanged) {
-    let selected = incoming;
-    if (equalUsage && dayComponentQuality(incoming) < dayComponentQuality(previous)) {
-      selected = mergeLiveDayMetadata(incoming, previous);
-      // A whole-day component summary is reusable only for identical attribution.
-      if (!attributionChanged && previous.componentSummary) {
-        selected.componentSummary = previous.componentSummary;
-      }
+  if (!liveDayIsGreater(incoming, previous) && !revisionChanged && !attributionChanged) {
+    return previous;
+  }
+  let selected = incoming;
+  if (equalUsage && dayComponentQuality(incoming) < dayComponentQuality(previous)) {
+    selected = mergeLiveDayMetadata(incoming, previous);
+    // A whole-day component summary is reusable only for identical attribution.
+    if (!attributionChanged && previous.componentSummary) {
+      selected.componentSummary = previous.componentSummary;
     }
-    return selected;
   }
-  // A partial scan must not discard the larger retained day. It can still
-  // correct a matching Qoder model without changing any tokens.
-  const observations = { ...previous.observations };
-  let changed = false;
-  for (const [key, observation] of Object.entries(incoming.observations)) {
-    const retained = observations[key];
-    if (observation.client !== 'qodercn' || !retained || observation.tokens !== retained.tokens
-      || isPartialCreditObservation(observation, retained)
-      || (observation.cost === 0 && observation.messages === 0)) continue;
-    observations[key] = {
-      ...retained, cost: observation.cost,
-      messages: Math.max(retained.messages, observation.messages),
-      ...(typeof observation.pricingRevision === 'string' ? { pricingRevision: observation.pricingRevision } : {})
-    };
-    changed = true;
-  }
-  return changed ? { ...previous, observations } : previous;
+  return selected;
 }
 
 function captureLiveDays(liveDays, period, options = {}) {
@@ -816,9 +711,7 @@ function captureLiveDailyHistory(existingArchive, period, options = {}) {
     }
   }
   const previous = archive.liveDays?.[date];
-  // The retention pass needs the persisted source day for this date, which only
-  // the archive-aware callers have.
-  const selected = captureLiveDay(previous, period, { ...options, sourceDay: archive.days?.[date] });
+  const selected = captureLiveDay(previous, period, options);
   if (selected && selected !== previous) {
     archive.liveDays = { ...(archive.liveDays || {}), [date]: selected };
   }
@@ -1015,8 +908,10 @@ function mergeLiveDaysIntoArchive(existingArchive, liveDays) {
   const archive = normalizeDailyHistoryArchive(existingArchive);
   const incoming = normalizeDailyHistoryArchive({ liveDays }).liveDays || {};
   for (const [date, liveDay] of Object.entries(incoming)) {
-    const selected = selectLiveDay(archive.liveDays?.[date], liveDay, archive.days?.[date]);
-    if (selected) archive.liveDays = { ...(archive.liveDays || {}), [date]: selected };
+    const previous = archive.liveDays?.[date];
+    if (!previous || liveDayIsGreater(liveDay, previous)) {
+      archive.liveDays = { ...(archive.liveDays || {}), [date]: liveDay };
+    }
   }
   return archive;
 }

@@ -225,10 +225,12 @@ const {
 } = require('./renderer/viewDisplayPreferences');
 const {
   defaultHomeModulePreferences,
+  migrateHomeLimitDisplayMode,
   normalizeHiddenHomeModules,
   normalizeHomeLimitDisplayMode,
   normalizeHomeModuleCounts,
-  normalizeHomeModuleOrder
+  normalizeHomeModuleOrder,
+  normalizeHomeSessionDisplayMode
 } = require('./renderer/homeModulePreferences');
 const {
   APP_UPDATE_STARTUP_DELAY_MS,
@@ -268,7 +270,7 @@ const { stepfunToken } = require('../shared/providers/stepfun/limits');
 // row behind. When ownership of the key changes, the whole provider is rebuilt.
 
 const subscriptionDisplay = require('../shared/subscriptionDisplay');
-const { CURRENCY_CODES, normalizeCurrency, resolveEffectiveRates, configureRates, convertUsd } = require('../shared/currency');
+const { CURRENCY_CODES, normalizeCurrency, resolveEffectiveRates, configureRates } = require('../shared/currency');
 const { normalizeCompactTokenUnits } = require('../shared/compactTokens');
 const { fetchRates, isCacheStale } = require('../shared/exchangeRates');
 const {
@@ -355,6 +357,7 @@ const { createCodexResetForecastClient } = require('./providers/codex/resetForec
 const { createUpdateInstallQuitGuard, observeUpdateInstallHandoff } = require('./updateInstallQuit');
 const { classifyStreamFailure } = require('./syncConnection');
 const {
+  attachLocalNativeRanges,
   attachLocalNativeViews,
   attachLocalPresentationNativeViews,
   completeLocalSyncStats,
@@ -482,7 +485,7 @@ const {
   normalizeWindowsBackdropMode,
   normalizeWindowsDockBackdropMode
 } = require('./windowsBackdropMode');
-const { refreshWindowsBackdrop, syncWindowsBackdrop, windowsBackdropFallback } = require('./windowsBackdrop');
+const { refreshWindowsBackdrop, syncWindowsBackdrop, windowsAccentActive, windowsBackdropFallback } = require('./windowsBackdrop');
 const {
   isLiquidGlassBackdrop,
   liquidGlassStyle,
@@ -553,6 +556,9 @@ let initialLimitProvidersPending = false;
 // settings are written through saveSettings() after the window exists, so the flag
 // carries the decision from the read to that first save.
 let seededClientSplitsPending = false;
+// Set by readSettings() when the one-time reset of the Home limits layout to
+// `default` changed a saved value; saved at the same point as a client split.
+let homeLimitDisplayModePending = false;
 let persistedSettingsSnapshot = null;
 let credentialStore = null;
 let openrouterSlotsMigrated = false;
@@ -579,7 +585,7 @@ if (!gotLock) app.exit(0);
 
 const HOME_LIMIT_ACCOUNT_COUNT_DEFAULT = 3;
 const HOME_LIMIT_ACCOUNT_COUNT_MAX = 12;
-const PERIOD_MONTH_MODES = new Set(['month', 'week', 'last7', 'last30', 'cycle']);
+const PERIOD_MONTH_MODES = new Set(['month', 'yesterday', 'week', 'last7', 'last30', 'cycle']);
 
 function normalizePeriodMonthMode(value) {
   return PERIOD_MONTH_MODES.has(value) ? value : 'month';
@@ -590,6 +596,7 @@ function normalizeProjectBreakdownMode(value) {
 }
 
 function normalizeBillingCycleStartDay(value) {
+  if (typeof value !== 'number' && typeof value !== 'string') return 1;
   const day = Number(value);
   return Number.isInteger(day) && day >= 1 && day <= 31 ? day : 1;
 }
@@ -642,7 +649,6 @@ function defaultSettings() {
     tokenRateMode: 'speed',
     heatmapMetric: 'cost',
     modelRankingMetric: 'tokens',
-    modelClientBreakdown: true,
     homeActiveDaysWindow: 'all',
     showExactHomeTrendTokens: false,
     // How a live session's context gauge reads. That direction is a choice the
@@ -653,6 +659,7 @@ function defaultSettings() {
     sessionTitlesEnabled: true,
     periodMonthMode: 'month',
     billingCycleStartDay: 1,
+    periodTabOrder: [],
     themeColors: {},
     vendorColors: {},
     textSize: 'standard',
@@ -730,7 +737,10 @@ function defaultSettings() {
     hiddenHomeModules: defaultHomeModulePreferences().hiddenHomeModules,
     homeModuleCounts: normalizeHomeModuleCounts(),
     showHomeLimitBars: false,
-    homeLimitDisplayMode: 'text',
+    homeVendorColors: false,
+    homeLimitDisplayMode: 'default',
+    homeLimitDisplayModeDefaulted: true,
+    homeSessionDisplayMode: 'compact',
     showHomeLimitProviderNames: false,
     projectsEnabled: parseBoolean(process.env.TOKEN_MONITOR_PROJECTS_ENABLED, true),
     projectBreakdownMode: 'tool',
@@ -774,10 +784,6 @@ function defaultSettings() {
     // Carve Claude Desktop sessions out of the Claude Code usage row (default on).
     // Off restores upstream behaviour: Desktop transcripts stay under `claude`.
     claudeDesktopSplitEnabled: parseBoolean(process.env.TOKEN_MONITOR_CLAUDE_DESKTOP_SPLIT, true),
-    // Seed from the kill-switch env so a first launch with the var set already
-    // has the flag in settings before any UI toggle. Account field initial is
-    // null (omit); this line is what makes the env visible on a fresh install.
-    claudeDesktopLocalOnly: parseBoolean(process.env.TOKEN_MONITOR_CLAUDE_DESKTOP_LOCAL_ONLY, false),
     antigravityLocalLimitsEnabled: true,
     // The key OpenCode stores for itself needs no setup, so tracking it is the
     // default. This turns that off for a machine that is signed in to an account
@@ -832,6 +838,7 @@ function resettableSettingsDefaults() {
     'language', 'startAtLogin', 'automaticAppUpdates', 'discordRpcEnabled',
     'periodMonthMode', 'currency', 'heatmapMetric', 'homeActiveDaysWindow', 'showExactHomeTrendTokens',
     'homeModuleCounts', 'homeLimitDisplayMode', 'showHomeLimitBars', 'showHomeLimitProviderNames', 'homeLimitAccountCount',
+    'homeVendorColors', 'homeSessionDisplayMode',
     'historyIntervalMs', 'sessionContextMetric', 'limitsHistoryOpenMode', 'modelRankingMetric', 'serviceStatusRefreshMs',
     'windowBehavior', 'keepAboveTaskbar', 'floatingBubbleTrigger', 'floatingBubbleContent',
     'hideAppIcon', 'trayContent', 'showTrayProviderBadge',
@@ -924,11 +931,20 @@ function syncUploadIntervalMs() {
   return normalizeSyncUploadIntervalMs(settings?.syncUploadIntervalMs);
 }
 
-function electronUsageConfig(errorPrefix) {
+// The collector composes the native Week range for this calendar week. The
+// renderer resolves the same locale and checks the range it receives.
+function collectorWeekStartsOn() {
+  const preferred = typeof app.getPreferredSystemLanguages === 'function' ? app.getPreferredSystemLanguages() : [app.getLocale()];
+  return fixedPeriodRangesApi.weekStartsOn(resolveRegionalLocale([...preferred, settings?.locale]));
+}
+
+function electronUsageConfig(errorPrefix, { nativeRangesEnabled = false } = {}) {
   return usageConfigFromSettings(settings, {
+    // Only standalone stats show native ranges; Hub and sync views keep the
+    // History-derived ones, so their collectors skip the extra day windows.
+    nativeRangesEnabled,
     agentVersion: appVersion(),
     agentRuntime: 'electron-widget',
-    qoderCnUsdPerCredit: 0.04 / convertUsd(1, 'CNY'),
     commandTimeoutMs: 120 * 1000,
     defaultDeviceId: defaultDeviceId(),
     intervalMs: collectorIntervalMs(),
@@ -938,16 +954,14 @@ function electronUsageConfig(errorPrefix) {
     // No watchUsePolling on purpose. The widget states no preference so the
     // shared default in resolveWatchUsePolling() governs and the widget cannot
     // drift from the headless agent, which has never passed one. That default
-    // is native events on every platform: chokidar 4 dropped the bundled
-    // fsevents backend, so every platform now watches through the same
-    // per-directory fs.watch path, and the earlier attempt that observed missed
-    // events ran on the chokidar 3 backend that no longer exists. Where the
-    // kernel cannot supply watch descriptors the collector degrades to polling
-    // by itself; TOKEN_MONITOR_WATCH_POLLING overrides in both directions.
+    // is native events on every platform. Where the kernel cannot supply watch
+    // descriptors the collector degrades to polling by itself;
+    // TOKEN_MONITOR_WATCH_POLLING overrides in both directions.
     watchTriggersCollection: collectorWatchTriggersCollection(),
     intervalRequiresActivity: collectorIntervalRequiresActivity(),
     watchDebounceMs: 1500,
     dailyHistoryArchiveWriteEnabled: () => !isExternalAgentActive(),
+    weekStartsOn: collectorWeekStartsOn(),
     onError: (error, reason) => console.log(`[${errorPrefix}] ${reason}: ${error.message}`),
     logger: (message) => console.log(`[${errorPrefix}] ${message}`)
   });
@@ -1018,15 +1032,14 @@ function removeAntigravityManagedAccount(...args) { return antigravityAccountSer
 function setAntigravityManagedAccountEnabled(...args) { return antigravityAccountService().setAntigravityManagedAccountEnabled(...args); }
 
 // The address (never a token) the local Antigravity language server last
-// reported, so this device's own sign-in stays selectable while agy is closed
-// and across restarts. Only written when it changes.
+// reported, so this device's own sign-in stays selectable while Antigravity is
+// closed and across restarts. Only written when it changes.
 function persistAntigravityLocalAccount({ accountEmail } = {}) {
   const email = String(accountEmail || '').trim().toLowerCase();
   if (!settings || !email || !email.includes('@')) return false;
   if (String(settings.antigravityLocalAccount?.accountEmail || '').toLowerCase() === email) return true;
   settings.antigravityLocalAccount = { accountEmail: email, seenAt: new Date().toISOString() };
-  saveSettings();
-  return true;
+  return saveSettings();
 }
 
 const { createMimoAccountService } = require('./providers/mimo/accountService');
@@ -1219,10 +1232,6 @@ function electronLimitsDeps() {
     },
     onAccountSlotResolved: (...args) => { void accountSlotService?.resolved(...args).catch(() => {}); },
     onAccountSlotCredentialRenewed: renewal => accountSlotService?.renew(renewal),
-    // Prefer the real process env. Never pass a blank env object here: an empty
-    // deps.env is truthy and would hide TOKEN_MONITOR_CLAUDE_DESKTOP_LOCAL_ONLY
-    // from claudeDesktopLocalOnly()'s first lane.
-    env: process.env,
     resolveConfigSnapshot: () => electronLimitsConfig(),
     onClaudeWebCookieRenewed: persistClaudeWebCookieRenewal,
     onClaudeWebAccountResolved: (observation) => claudeAccountService().resolved(observation),
@@ -1623,12 +1632,13 @@ function ensureSettingsLoaded() {
       settings.codexManagedAccounts = hydratedCodexAccounts;
     }
   }
-  // A seeded client identity split is an in-memory addition at this point.
-  // Persist it with the same retry-on-next-save tolerance as the migration
-  // above, so a read-only or failing settings file delays the write instead of
-  // losing the tracked client.
-  if (seededClientSplitsPending) {
+  // A seeded client identity split and the one-time Home limits layout reset are
+  // in-memory changes at this point. Persist them with the same
+  // retry-on-next-save tolerance as the migration above, so a read-only or
+  // failing settings file delays the write instead of losing the change.
+  if (seededClientSplitsPending || homeLimitDisplayModePending) {
     seededClientSplitsPending = false;
+    homeLimitDisplayModePending = false;
     saveSettings();
   }
   rendererViewState = normalizeInitialRendererViewState(settings.lastViewState, rendererViewState);
@@ -1824,7 +1834,7 @@ function collapseFloatingBubble(plan) {
   floatingBubbleState.collapsedBounds = collapsedBounds;
   floatingBubbleState.expandedBounds = expandedBounds;
   settings.floatingBubbleBounds = collapsedBounds;
-  applyNativeMaterial();
+  if (applyNativeMaterial()) pushSettingsToRenderer();
   if (process.platform === 'win32') {
     persistWindowBounds(expandedBounds);
     replaceMainWindow(collapsedBounds, {
@@ -1874,7 +1884,7 @@ function expandFloatingBubble(options = {}) {
   floatingBubbleState.side = null;
   floatingBubbleState.collapsedBounds = current;
   floatingBubbleState.expandedBounds = target;
-  applyNativeMaterial();
+  if (applyNativeMaterial()) pushSettingsToRenderer();
   if (target) {
     floatingBubbleState.suppressNextCollapse = true;
     if (process.platform === 'win32' && mainWindowChrome.collapsedFloatingBubble) {
@@ -2109,6 +2119,7 @@ function readSettings() {
     // Evaluating unconditionally is also cheap: with the split client already
     // present nothing is inserted, and the marker is what makes that a decision
     // rather than an absence.
+    merged.claudeDesktopSplitEnabled = parseBoolean(merged.claudeDesktopSplitEnabled, true);
     const seeded = seedSplitClients(merged.clients, {
       applied: merged.seededClientSplits,
       claudeDesktopSplitEnabled: merged.claudeDesktopSplitEnabled !== false
@@ -2165,8 +2176,13 @@ function readSettings() {
       merged.hiddenHomeModules = normalizeHiddenHomeModules(saved.hiddenHomeModules, DEFAULT_HOME_MODULE_LIST);
     }
     merged.showHomeLimitBars = parseBoolean(merged.showHomeLimitBars, false);
+    merged.homeVendorColors = parseBoolean(merged.homeVendorColors, false);
     merged.homeModuleCounts = normalizeHomeModuleCounts(merged.homeModuleCounts);
-    merged.homeLimitDisplayMode = normalizeHomeLimitDisplayMode(merged.homeLimitDisplayMode);
+    merged.homeSessionDisplayMode = normalizeHomeSessionDisplayMode(merged.homeSessionDisplayMode);
+    const homeLimitDisplay = migrateHomeLimitDisplayMode(saved.homeLimitDisplayMode, saved.homeLimitDisplayModeDefaulted);
+    merged.homeLimitDisplayMode = homeLimitDisplay.mode;
+    merged.homeLimitDisplayModeDefaulted = true;
+    homeLimitDisplayModePending = homeLimitDisplay.changed;
     merged.showHomeLimitProviderNames = parseBoolean(merged.showHomeLimitProviderNames, false);
     merged.claudeCliFallbackEnabled = parseBoolean(merged.claudeCliFallbackEnabled, true);
     merged.antigravityLocalLimitsEnabled = parseBoolean(merged.antigravityLocalLimitsEnabled, true);
@@ -2175,11 +2191,6 @@ function readSettings() {
     merged.limitsHistoryOpenMode = ['hover', 'click', 'off'].includes(merged.limitsHistoryOpenMode) ? merged.limitsHistoryOpenMode : 'hover';
     merged.showCodexAdditionalLimits = parseBoolean(merged.showCodexAdditionalLimits, true);
     merged.opencodeLocalLimitsEnabled = parseBoolean(merged.opencodeLocalLimitsEnabled, false);
-    merged.claudeDesktopSplitEnabled = parseBoolean(merged.claudeDesktopSplitEnabled, true);
-    if (merged.claudeDesktopLocalOnly !== undefined && merged.claudeDesktopLocalOnly !== null) {
-      merged.claudeDesktopLocalOnly = merged.claudeDesktopLocalOnly === true
-        || /^(1|true|yes|on)$/i.test(String(merged.claudeDesktopLocalOnly).trim());
-    }
     delete merged.workbuddyLocalAppEnabled;
     merged.windowMaximized = parseBoolean(merged.windowMaximized, false);
     merged.automaticAppUpdates = parseBoolean(merged.automaticAppUpdates, false);
@@ -2193,6 +2204,7 @@ function readSettings() {
     merged.homeLimitAccountCount = normalizeHomeLimitAccountCount(merged.homeLimitAccountCount);
     merged.periodMonthMode = normalizePeriodMonthMode(merged.periodMonthMode);
     merged.billingCycleStartDay = normalizeBillingCycleStartDay(merged.billingCycleStartDay);
+    merged.periodTabOrder = fixedPeriodRangesApi.normalizePeriodTabOrder(merged.periodTabOrder);
     if (saved.historyEnabled !== undefined) {
       merged.historyEnabled = parseBoolean(saved.historyEnabled, false);
     }
@@ -2213,7 +2225,6 @@ function readSettings() {
     merged.syncUploadIntervalMs = normalizeSyncUploadIntervalMs(merged.syncUploadIntervalMs);
     merged.heatmapMetric = normalizeHeatmapMetric(merged.heatmapMetric);
     merged.modelRankingMetric = normalizeRankingMetric(merged.modelRankingMetric);
-    merged.modelClientBreakdown = parseBoolean(merged.modelClientBreakdown, true);
     merged.homeActiveDaysWindow = normalizeHomeActiveDaysWindow(merged.homeActiveDaysWindow);
     merged.showExactHomeTrendTokens = parseBoolean(merged.showExactHomeTrendTokens, false);
     merged.sessionTitlesEnabled = parseBoolean(merged.sessionTitlesEnabled, true);
@@ -2644,9 +2655,12 @@ function nativeMaterialOptions(source = settings, dashboard = false) {
 function applyNativeMaterial(source = settings) {
   syncNativeMaterialVisibility(mainWindow, nativeMaterialOptions(source));
   syncNativeMaterialVisibility(dashboardWindow, nativeMaterialOptions(source, true));
-  syncWindowsBackdrop(mainWindow, { enabled: nativeBlurEnabled(source), mode: source.windowsBackdrop });
-  syncWindowsBackdrop(dashboardWindow, { enabled: nativeBlurEnabled(source) });
+  const windowsMaterial = { enabled: nativeBlurEnabled(source), mode: source.windowsBackdrop };
+  const hadAccent = windowsAccentActive(mainWindow);
+  syncWindowsBackdrop(mainWindow, windowsMaterial);
+  syncWindowsBackdrop(dashboardWindow, windowsMaterial);
   limitsHistoryController?.syncMaterial();
+  return hadAccent !== windowsAccentActive(mainWindow);
 }
 
 function withHistoryPreview(stats, devices) {
@@ -4796,17 +4810,10 @@ function writeRateCache(data) {
 }
 
 function applyEffectiveRates() {
-  const previousCnyRate = effectiveRates?.CNY;
   const next = resolveEffectiveRates(rateCache?.rates || {}, settings?.currencyRates || {});
   const changed = CURRENCY_CODES.some(code => effectiveRates?.[code] !== next[code]);
   effectiveRates = next;
   configureRates(effectiveRates);          // main process's own currency module
-  // Collection normally runs on a worker, with its own currency module.
-  // Send the effective scalar through the existing runtime config/reconciler.
-  if (deviceRuntimeHandle && previousCnyRate !== effectiveRates.CNY
-    && trackedClientSet(settings?.clients).has('qodercn')) {
-    reconfigureUsageRuntimeForMode();
-  }
   if (changed) pluginRuntime?.refreshBusinessData();
   return effectiveRates;
 }
@@ -4978,6 +4985,9 @@ function primeLocalStatsFromAnchor(usageOptions, widgetProducerOwner) {
       projectsEnabled: usageOptions.projectsEnabled,
       customScanPaths: usageOptions.customScanPaths,
       wslScanEnabled: usageOptions.wslScanEnabled,
+      nativeRangesEnabled: usageOptions.nativeRangesEnabled,
+      weekStartsOn: usageOptions.weekStartsOn,
+      codexDotsVisible: usageOptions.codexDotsVisible,
       wslSupported: process.platform === 'win32',
       historyEnabled: usageOptions.historyEnabled,
       dailyHistoryArchiveEnabled: usageOptions.dailyHistoryArchiveEnabled,
@@ -5004,7 +5014,7 @@ function primeLocalStatsFromAnchor(usageOptions, widgetProducerOwner) {
   }
   anchorSeedDevice = visible;
   localDevice = visible;
-  localStats = withHistoryPreview(aggregateDevices([visible], 0), [visible]);
+  localStats = coldLocalStats(visible);
   // Through the normal publisher, not straight to the renderer: the tray reads
   // what sendPush sets, and in tray mode the window is hidden, so a seed that
   // only reached the renderer would leave the one visible surface on zero.
@@ -5018,6 +5028,12 @@ function primeLocalStatsFromAnchor(usageOptions, widgetProducerOwner) {
   }, { skipExport: true, deferToRenderer: true, widgetProducerOwner });
 }
 
+function coldLocalStats(device) {
+  const stats = withHistoryPreview(aggregateDevices([device], 0), [device]);
+  stats.nativeRangesPending = true;
+  return attachLocalNativeRanges(stats, device);
+}
+
 // The first scan holds its record back until all-time is in, which on a long
 // history is minutes after Today was ready. Show each window as it lands, over
 // the seed's last known values when there is one. Display only: nothing here is
@@ -5026,7 +5042,7 @@ function publishColdPreview(preview, reason, widgetProducerOwner) {
   if (lastCollectedDevice) return;
   const device = seedWithColdPreview(anchorSeedDevice || preview, preview);
   localDevice = device;
-  localStats = withHistoryPreview(aggregateDevices([device], 0), [device]);
+  localStats = coldLocalStats(device);
   sendPush({
     event: 'stats',
     data: { type: 'stats', reason, stats: localStats, at: new Date().toISOString() }
@@ -5040,7 +5056,7 @@ function startLocalCollector() {
   sendStatus(false, { reason: 'collecting' });
   // One config object for both, so the fingerprint the seed validates against
   // cannot drift from the one the collector will compute.
-  const usageOptions = electronUsageConfig('collector');
+  const usageOptions = electronUsageConfig('collector', { nativeRangesEnabled: true });
   primeLocalStatsFromAnchor(usageOptions, widgetProducerOwner);
   deviceRuntimeHandle = createDeviceRuntime({
     envelope: electronDeviceEnvelope(),
@@ -5061,6 +5077,7 @@ function startLocalCollector() {
       localStats = composeLocalOnlySummary(localDevice, (stats) => {
         withHistoryPreview(stats, [localDevice]);
         attachLocalNativeViews(stats, localDevice);
+        attachLocalNativeRanges(stats, localDevice);
         return stats;
       });
       updateDiscordRpcDisplay(localStats);
@@ -5312,6 +5329,7 @@ function settingsForRenderer() {
   delete rendererSettings.limitAccountPresentationPending;
   delete rendererSettings.syncContentState;
   delete rendererSettings.pluginSkinRef;
+  delete rendererSettings.antigravityLocalAccount;
   // Usage retained for untracked clients: only the collector transform reads
   // it, and it is most of the settings payload a renderer would clone and keep.
   delete rendererSettings.archivedClientUsage;
@@ -5320,6 +5338,7 @@ function settingsForRenderer() {
   const locale = trayMenuLocale();
   return {
     ...rendererSettings,
+    windowsAccentActive: windowsAccentActive(mainWindow),
     windowsBackdropFallback: windowsBackdropFallback(mainWindow),
     syncContentStatus: getSyncContentRuntime().status(),
     locale,
@@ -5603,7 +5622,10 @@ function syncNotch(rendererSettings) {
 // allowlisted appearance projection instead of the full renderer settings.
 function edgeDockAppearance(rendererSettings = settingsForRenderer()) {
   const source = rendererSettings || {};
+  const deviceIconScope = source.deviceIconScope || 'local';
   return {
+    deviceIconScope,
+    deviceIconOverrides: { [deviceIconScope]: source.deviceIconOverrides?.[deviceIconScope] },
     language: source.language,
     currency: source.currency,
     currencyRatesEffective: source.currencyRatesEffective,
@@ -6581,7 +6603,7 @@ function usageCollectorNameForMode() {
 }
 
 function usageConfigForMode() {
-  return electronUsageConfig(usageCollectorNameForMode());
+  return electronUsageConfig(usageCollectorNameForMode(), { nativeRangesEnabled: mode === 'local' });
 }
 
 function applyUsageRuntimeForMode() {
@@ -7623,7 +7645,8 @@ function replaceMainWindow(bounds, options = {}) {
     });
     const next = mainWindow;
     if (process.platform === 'win32') {
-      if (windowsBackdropFallback(old) !== windowsBackdropFallback(next)) pushSettingsToRenderer();
+      if (windowsBackdropFallback(old) !== windowsBackdropFallback(next)
+        || windowsAccentActive(old) !== windowsAccentActive(next)) pushSettingsToRenderer();
       sendFloatingBubbleState();
       if (old?.isMinimized()) next.minimize();
       else if (old?.isVisible()) {
@@ -7688,7 +7711,7 @@ function createDashboardWindow() {
   dashboardWindowReady = false;
   applyWindowsChrome(win, { round: true });
   suppressLinuxSystemContextMenu(win);
-  syncWindowsBackdrop(win, { enabled: nativeBlurEnabled() });
+  syncWindowsBackdrop(win, { enabled: nativeBlurEnabled(), mode: settings.windowsBackdrop });
   attachNativeMaterialVisibility(win, () => nativeMaterialOptions(settings, true));
   syncNativeMaterialVisibility(win, nativeMaterialOptions(settings, true));
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -7795,7 +7818,7 @@ app.whenReady().then(() => {
   // icon we have already handed to the shell, so the renderer has to recompose
   // it — nothing else in the app would notice the change.
   nativeTheme.on('updated', () => {
-    applyNativeMaterial();
+    if (applyNativeMaterial()) pushSettingsToRenderer();
     // Rebuilds the dock only when Reduce Transparency moved its material.
     if (edgeDockController?.isRunning()) edgeDockController.sync();
     if (notchController?.isRunning()) notchController.sync();
@@ -8119,6 +8142,7 @@ app.whenReady().then(() => {
     const normalizedPatch = { ...patch, currency: normalizedCurrency };
     // Only Cursor's explicit account lifecycle can assign manual ownership.
     delete normalizedPatch.cursorManualAccountIds;
+    delete normalizedPatch.antigravityLocalAccount;
     delete normalizedPatch.windowMaximized;
     delete normalizedPatch.workbuddyEndpoint;
     delete normalizedPatch.workbuddyLocalAppEnabled;
@@ -8302,7 +8326,9 @@ app.whenReady().then(() => {
       homeModuleCounts: normalizeHomeModuleCounts(patch.homeModuleCounts, settings.homeModuleCounts),
       showHomeLimitBars: parseBoolean(patch.showHomeLimitBars ?? settings.showHomeLimitBars, false),
       showExactHomeTrendTokens: parseBoolean(patch.showExactHomeTrendTokens ?? settings.showExactHomeTrendTokens, false),
+      homeVendorColors: parseBoolean(patch.homeVendorColors ?? settings.homeVendorColors, false),
       homeLimitDisplayMode: normalizeHomeLimitDisplayMode(patch.homeLimitDisplayMode ?? settings.homeLimitDisplayMode),
+      homeSessionDisplayMode: normalizeHomeSessionDisplayMode(patch.homeSessionDisplayMode ?? settings.homeSessionDisplayMode),
       showHomeLimitProviderNames: parseBoolean(patch.showHomeLimitProviderNames ?? settings.showHomeLimitProviderNames, false),
       homeLimitProviderOrder: patch.homeLimitProviderOrder !== undefined ? migrateHomeLimitProviderOrder(patch.homeLimitProviderOrder) : (settings.homeLimitProviderOrder || ''),
       hiddenHomeLimitProviders: patch.hiddenHomeLimitProviders !== undefined ? normalizeHiddenLimitProviders(patch.hiddenHomeLimitProviders) : normalizeHiddenLimitProviders(settings.hiddenHomeLimitProviders),
@@ -8310,8 +8336,9 @@ app.whenReady().then(() => {
       homeLimitAccountCount: normalizeHomeLimitAccountCount(patch.homeLimitAccountCount ?? settings.homeLimitAccountCount),
       periodMonthMode: normalizePeriodMonthMode(patch.periodMonthMode ?? settings.periodMonthMode),
       billingCycleStartDay: normalizeBillingCycleStartDay(patch.billingCycleStartDay ?? settings.billingCycleStartDay),
+      periodTabOrder: patch.periodTabOrder === undefined ? settings.periodTabOrder
+        : fixedPeriodRangesApi.normalizePeriodTabOrder(patch.periodTabOrder),
       modelRankingMetric: normalizeRankingMetric(patch.modelRankingMetric ?? settings.modelRankingMetric),
-      modelClientBreakdown: parseBoolean(patch.modelClientBreakdown ?? settings.modelClientBreakdown, true),
       sessionTitlesEnabled: parseBoolean(patch.sessionTitlesEnabled ?? settings.sessionTitlesEnabled, true),
       sessionContextMetric: normalizeSessionContextMetric(patch.sessionContextMetric ?? settings.sessionContextMetric),
       historyEnabled: parseBoolean(patch.historyEnabled ?? settings.historyEnabled, false),
@@ -8334,10 +8361,6 @@ app.whenReady().then(() => {
       claudePrepaidBalanceEnabled: parseBoolean(patch.claudePrepaidBalanceEnabled ?? settings.claudePrepaidBalanceEnabled, true),
       claudeCliFallbackEnabled: parseBoolean(patch.claudeCliFallbackEnabled ?? settings.claudeCliFallbackEnabled, true),
       claudeDesktopSplitEnabled: parseBoolean(patch.claudeDesktopSplitEnabled ?? settings.claudeDesktopSplitEnabled, true),
-      // Persist explicitly (not only via account persist:spread) so an unrelated
-      // settings:update cannot drop the flag, and so limitsConfigFromSettings
-      // always sees a boolean rather than an absent key.
-      claudeDesktopLocalOnly: parseBoolean(patch.claudeDesktopLocalOnly ?? settings.claudeDesktopLocalOnly, false),
       antigravityLocalLimitsEnabled: parseBoolean(patch.antigravityLocalLimitsEnabled ?? settings.antigravityLocalLimitsEnabled, true),
       codexResetForecastEnabled: parseBoolean(patch.codexResetForecastEnabled ?? settings.codexResetForecastEnabled, false),
       workbuddyQuotaTotalEnabled: parseBoolean(patch.workbuddyQuotaTotalEnabled ?? settings.workbuddyQuotaTotalEnabled, false),
@@ -8727,7 +8750,7 @@ app.whenReady().then(() => {
   ipcMain.handle('session:getDetail', (_event, args) => {
     const { client, sessionId, period, sessionCost } = args || {};
     return readSessionDetailForPlatform({ client, sessionId, period, sessionCost }, {
-      lookupModelPricing, getPricingRevision: () => pricingFingerprint({ clients: client, pricingPath: customPricingPath() })
+      lookupModelPricing, getPricingRevision: () => pricingFingerprint({ pricingPath: customPricingPath() })
     });
   });
   ipcMain.handle('stream:status', () => ({ connected: streamConnected, mode, ...(streamFailure || {}) }));

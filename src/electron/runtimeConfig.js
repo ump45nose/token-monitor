@@ -44,9 +44,10 @@ const USAGE_STRUCTURAL_KEYS = Object.freeze([
 // whether replacing the active usage runtime would change its collection work.
 // Values arrive from usageConfigFromSettings() after mode-specific normalization.
 const USAGE_CONFIG_FINGERPRINT_KEYS = Object.freeze([
-  'qoderCnUsdPerCredit',
   'clients',
   'codexDotsEnabled',
+  'nativeRangesEnabled',
+  'weekStartsOn',
   'customScanPaths',
   'allTimeSince',
   'intervalMs',
@@ -71,11 +72,6 @@ const LIMITS_RECONFIGURE_KEYS = Object.freeze([
   'cursorManualAccountIds',
   'opencodeLocalLimitsEnabled',
   'claudeCliFallbackEnabled',
-  // Must reconfigure so the runtime's options carry the flag; relying only on
-  // resolveConfigSnapshot is not enough when a probe is already in flight with
-  // a cloned pre-toggle snapshot, and clears the previous notConfigured row.
-  'claudeDesktopLocalOnly',
-  'claudeDesktopOrgId',
   'antigravityLocalLimitsEnabled'
 ]);
 const SINK_STRUCTURAL_KEYS = Object.freeze(['syncUploadIntervalMs']);
@@ -106,16 +102,12 @@ function normalizeAllTimeSince(value, fallback = DEFAULT_ALL_TIME_SINCE) {
 }
 
 function usageConfigFromSettings(settings = {}, context = {}) {
-  const clients = clientsCsvForSetting(settings.clients);
   return {
-    clients,
+    clients: clientsCsvForSetting(settings.clients),
     codexDotsEnabled: settings.codexDotsEnabled === true,
     codexDotsVisible: settings.codexDotsVisible !== false,
     customScanPaths: normalizeCustomScanPaths(settings.customScanPaths),
     allTimeSince: normalizeAllTimeSince(settings.allTimeSince),
-    qoderCnUsdPerCredit: !clients || clients.split(',').includes('qodercn')
-      ? context.qoderCnUsdPerCredit
-      : undefined,
     commandTimeoutMs: Number(context.commandTimeoutMs || 120 * 1000),
     deviceId: settings.deviceId || context.defaultDeviceId,
     agentVersion: context.agentVersion,
@@ -137,6 +129,8 @@ function usageConfigFromSettings(settings = {}, context = {}) {
     intervalRequiresActivity: Boolean(context.intervalRequiresActivity),
     watchDebounceMs: Number(context.watchDebounceMs || 1500),
     wslScanEnabled: settings.wslScanEnabled === true,
+    nativeRangesEnabled: context.nativeRangesEnabled === true,
+    ...(Number.isInteger(context.weekStartsOn) ? { weekStartsOn: context.weekStartsOn } : {}),
     onError: context.onError,
     logger: context.logger
   };

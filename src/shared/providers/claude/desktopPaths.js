@@ -1,7 +1,7 @@
 'use strict';
 
 // Claude Desktop (Anthropic's Electron app) userData roots. Read-only
-// discovery for the local plan-usage history and the Desktop session index;
+// discovery for the Claude Desktop session index and app presence checks;
 // nothing here opens a network connection, reads a credential or touches the
 // running app.
 //

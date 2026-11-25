@@ -48,6 +48,7 @@ test('the main settings IPC projection hides provider secrets while retaining co
   settings.icloudWriterId = 'private-writer-id';
   settings.icloudRetiredDeviceIds = ['private-retired-device'];
   settings.syncContentState = { privateCleanupState: true };
+  settings.antigravityLocalAccount = { accountEmail: 'local@example.com', seenAt: '2026-11-25T00:00:00.000Z' };
   settings.archivedClientUsage = { version: 1, clients: { retired: { privateSentinel: 'private-archive-sentinel' } } };
   const snapshot = structuredClone(settings);
   const main = fs.readFileSync(path.join(__dirname, '../../src/electron/main.js'), 'utf8');
@@ -59,7 +60,7 @@ test('the main settings IPC projection hides provider secrets while retaining co
   // are fixtures; this is not an Electron runtime test. The extracted source has
   // no source map and deliberately receives no credit against main.js coverage.
   const project = vm.runInNewContext(`${main.slice(start, end)}; settingsForRenderer`, {
-    settings, mainWindow: null, windowsBackdropFallback: () => false,
+    settings, mainWindow: null, windowsAccentActive: () => false, windowsBackdropFallback: () => false,
     networkProxySource, normalizePluginAuthorSkin, credentialSettingsForRenderer, hubProfilesForRenderer, accountFieldProjection, accountStatusProjection,
     limitAccountFormsForRenderer,
   limitConnectionSourcesForRenderer, rendererOmittedAccountKeys, process: { env: {} },
@@ -87,6 +88,7 @@ test('the main settings IPC projection hides provider secrets while retaining co
   assert.equal(projected.icloudWriterId, undefined);
   assert.equal(projected.icloudRetiredDeviceIds, undefined);
   assert.equal(projected.syncContentState, undefined);
+  assert.equal(projected.antigravityLocalAccount, undefined);
   assert.equal(projected.archivedClientUsage, undefined);
   for (const form of Object.values(projected.limitAccountForms)) {
     for (const field of form.fields || []) {

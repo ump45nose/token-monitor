@@ -20,8 +20,8 @@
 // Claude Desktop splits from Claude Code the same way. tokscale has always
 // reported Desktop's Code-tab and Cowork transcripts under `claude`; Token
 // Monitor now moves the Desktop-started sessions onto a derived
-// `claude-desktop` row (claudeDesktopSessions.js), so every `claude` snapshot
-// stored before that includes Desktop usage.
+// `claude-desktop` row (providers/claude/desktopSessions.js), so every `claude`
+// snapshot stored before that includes Desktop usage.
 //
 // `generation` is the client-identity generation that introduced the split: an
 // archive entry written under an older generation predates *that* split, even

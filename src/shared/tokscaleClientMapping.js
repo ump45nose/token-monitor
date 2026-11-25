@@ -19,8 +19,8 @@ const TOKSCALE_CLIENT_GROUPS = Object.freeze({
   // `claude-desktop` is derived, not scanned: tokscale reports Claude Desktop's
   // transcripts under its `claude` client, and the collector moves the rows of
   // Desktop-started sessions onto this id after the scan (see
-  // claudeDesktopSessions.js). Scanning it therefore means scanning `claude`,
-  // and it takes no custom roots of its own.
+  // providers/claude/desktopSessions.js). Scanning it therefore means scanning
+  // `claude`, and it takes no custom roots of its own.
   'claude-desktop': Object.freeze({
     aliases: Object.freeze([]),
     scanIds: Object.freeze(['claude']),

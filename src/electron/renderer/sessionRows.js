@@ -40,6 +40,11 @@
     return [row?.modelLabel ?? sessionModelLabel(row), sessionReasoningEffortForRow(row)].filter(Boolean).join(' · ');
   }
 
+  function remoteSessionDevice(sourceDevice, localDeviceId) {
+    return localDeviceId && sourceDevice?.deviceId && sourceDevice.deviceId !== localDeviceId && sourceDevice.name
+      ? sourceDevice : null;
+  }
+
   function sessionSubtitleForDisplay(row, subtitle, { keepClient = false } = {}) {
     const text = subtitle || '';
     const client = row.clientLabel || row.client;
@@ -225,12 +230,9 @@
   }
 
   function sessionModelLabel(session) {
-    const models = [...new Set([
-      ...Object.entries(session?.models || {}),
-      ...Object.entries(session?.modelCosts || {})
-    ]
+    const models = Object.entries(session?.models || {})
       .filter(([, value]) => finiteNumber(value) > 0)
-      .map(([model]) => model))]
+      .map(([model]) => model)
       .sort();
     const latest = textValue((session?.groupRows?.[0] || session)?.latestModel);
     if (latest) {
@@ -251,13 +253,8 @@
     const entries = Object.entries(session?.models || {})
       .map(([model, tokens]) => ({ model: String(model || ''), tokens: finiteNumber(tokens) }))
       .filter((entry) => entry.tokens > 0);
-    const measuredModels = new Set(entries.map(entry => entry.model));
-    const costOnlyModels = Object.entries(session?.modelCosts || {})
-      .filter(([model, cost]) => model && finiteNumber(cost) > 0 && !measuredModels.has(model))
-      .map(([model]) => model).sort();
     const latest = textValue((session?.groupRows?.[0] || session)?.latestModel);
-    const hasDistinctLatest = Boolean(latest) && !entries.every(entry => entry.model === latest);
-    if (entries.length + costOnlyModels.length < 2 && !hasDistinctLatest) return [];
+    if (entries.length < 2 && (!latest || entries.every(entry => entry.model === latest))) return [];
     entries.sort((a, b) => b.tokens - a.tokens || a.model.localeCompare(b.model));
     const total = finiteNumber(session?.totalTokens);
     const attributed = entries.reduce((sum, entry) => sum + entry.tokens, 0);
@@ -286,8 +283,6 @@
         percentLabel(unattributed / denominator * 100)
       ]);
     }
-    // A known model name does not imply measured token counts or a share.
-    rows.push(...costOnlyModels.map(model => [model, '', '']));
     return rows;
   }
 
@@ -298,6 +293,20 @@
 
   function sessionActivityLabel(session, now) {
     return compactSessionTime(session?.lastUsedAt || session?.startedAt, now);
+  }
+
+  // The one-line age a row carries ("<1m", "28m", "3h", "2d"), in the same units
+  // as the limit countdowns. Shared so Home, the edge dock and the notch read
+  // alike; each row keeps the full localized phrase as its accessible name.
+  function sessionAgeShort(value, now = Date.now()) {
+    const ms = typeof value === 'number' ? value : Date.parse(value || '');
+    if (!Number.isFinite(ms) || ms <= 0) return '';
+    const minutes = Math.round(Math.max(0, now - ms) / 60000);
+    if (minutes < 1) return '<1m';
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) return `${hours}h`;
+    return `${Math.round(hours / 24)}d`;
   }
 
   function textValue(value) {
@@ -654,7 +663,7 @@
         }
         if (isReasonixSyntheticSession(session, key)) return null;
         const value = finiteNumber(session?.totalTokens);
-        if (value <= 0 && finiteNumber(session?.costUsd) <= 0) return null;
+        if (value <= 0) return null;
         const { client, titleParts, clientLabel, modelLabel, sessionTitle, detail, message,
           cacheHit, tokenRate, usageMetrics, modelTooltipEntries } =
           sessionRowLabels(session, key, options, previousLabels, nextLabels);
@@ -717,7 +726,6 @@
           // Raw per-model tokens, so a group row can rebuild its model label and
           // tooltip from every member rather than from one of them.
           modelTokens: session?.models,
-          modelCosts: session?.modelCosts,
           backgroundReview: backgroundReview || undefined,
           subagent: subagent || undefined,
           subagentLabel: subagent ? subagentLabel : undefined,
@@ -852,16 +860,12 @@
     // The model label and its tooltip describe the tokens the row shows, which
     // are the whole group's, so they are rebuilt from every member's models.
     const models = {};
-    const modelCosts = {};
     for (const row of groupRows) {
       for (const [model, tokens] of Object.entries(row.modelTokens || {})) {
         models[model] = (models[model] || 0) + finiteNumber(tokens);
       }
-      for (const [model, cost] of Object.entries(row.modelCosts || {})) {
-        modelCosts[model] = (modelCosts[model] || 0) + finiteNumber(cost);
-      }
     }
-    const group = { client: parent.client, models, modelCosts, totalTokens: value, latestModel: main[0].latestModel };
+    const group = { client: parent.client, models, totalTokens: value, latestModel: main[0].latestModel };
     const modelLabel = sessionModelLabel(group);
     const display = main[0];
     const titleParts = [display.clientLabel || display.client, modelLabel, sessionReasoningEffortForRow(display)].filter(Boolean).join(' · ');
@@ -902,7 +906,6 @@
       modelTooltipEntries: options.includeModelTooltip === false ? []
         : sessionModelTooltipEntries(group, { unattributedLabel: options.unattributedLabel, latestModelLabel: options.latestModelLabel }),
       modelTokens: models,
-      modelCosts,
       // Keep the tool/model reading order; the renderer reserves space for the
       // count while the preceding text can shrink in a narrow window.
       subtitle: [display.titled ? titleParts : activity, countLabel].filter(Boolean).join(' · '),
@@ -1009,6 +1012,7 @@
     sessionStatusNode,
     sessionReasoningEffortForRow,
     sessionModelMetadataLabel,
+    remoteSessionDevice,
     sessionSubtitleForDisplay,
     sessionModelMetadataNode,
     applyBreakdownRowSemantics,
@@ -1028,6 +1032,7 @@
     sessionIdLabel,
     sessionDetailIdLabel,
     sessionTitleForDisplay,
+    sessionAgeShort,
     // Exported for the edge dock's session rows: a card that shows the top
     // model reads a different name than the list's "N models" for the same
     // session, so both surfaces compose the label from this one helper.

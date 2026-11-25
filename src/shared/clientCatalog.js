@@ -49,9 +49,10 @@
   //
   // `derivedFrom: '<client>'` marks a row tokscale never emits by itself: it is
   // carved out of the parent client's session rows by Token Monitor (see
-  // claudeDesktopSessions.js for `claude-desktop`). It is scanned with the
-  // parent's tokscale id, takes no custom scan roots, and its rows belonged to
-  // the parent before the split (clientIdentitySplits.js folds old data).
+  // providers/claude/desktopSessions.js for `claude-desktop`). It is scanned
+  // with the parent's tokscale id, takes no custom scan roots, and its rows
+  // belonged to the parent before the split (clientIdentitySplits.js folds old
+  // data).
   const CLIENT_CATALOG = Object.freeze([
     { id: 'claude', label: 'Claude Code' },
     // Sessions Claude Desktop started (its Code tab and Cowork). Third-party

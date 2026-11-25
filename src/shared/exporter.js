@@ -56,12 +56,12 @@ function buildSnapshotRows(periods) {
     if (!p || typeof p !== 'object') continue;
     const clients = p.clients || {};
     const clientCosts = p.clientCosts || {};
-    for (const name of new Set([...Object.keys(clients), ...Object.keys(clientCosts)])) {
+    for (const name of Object.keys(clients)) {
       rows.push({ period, dimension: 'tool', name, tokens: num(clients[name]), cost_usd: num(clientCosts[name]) });
     }
     const models = p.models || {};
     const modelCosts = p.modelCosts || {};
-    for (const name of new Set([...Object.keys(models), ...Object.keys(modelCosts)])) {
+    for (const name of Object.keys(models)) {
       rows.push({ period, dimension: 'model', name, tokens: num(models[name]), cost_usd: num(modelCosts[name]) });
     }
   }
