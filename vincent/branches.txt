@@ -9,4 +9,3 @@ fix/archive-alias-dedupe                # PR #1671
 fix/antigravity-remember-local-account  # PR #1672
 feat/billing-cycle-range                # PR #1300
 feat/claude-desktop-local               # PR #1126 (slimmed to claude-desktop usage split only)
-feat/t3-antigravity-kiro-sessions       # PR #1675 (T3 Antigravity ACP summaries + Kiro/Antigravity grouping)
