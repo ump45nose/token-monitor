@@ -1,0 +1,11 @@
+# Fork branches merged onto each upstream release by scripts/vincent-release.sh.
+# Format: <branch on ump45nose/token-monitor>   # upstream PR / note
+# Order matters. Blank lines and text after '#' are ignored.
+# Drop a line once upstream has shipped it; the script also skips branches the
+# release tag already contains.
+vincent/release-tools                   # this script and manifest
+vincent/fork-updater                    # in-app update check follows ump45nose/token-monitor releases
+fix/archive-alias-dedupe                # PR #1671
+fix/antigravity-remember-local-account  # PR #1672
+feat/billing-cycle-range                # PR #1300
+feat/claude-desktop-local               # PR #1126 (slimmed to claude-desktop usage split only)
